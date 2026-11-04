@@ -32,18 +32,6 @@ export interface SessionAsset {
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
 }
 
-/**
- * Memory asset. Memory is a file-write product, not an event log: Qoder and
- * Claude Code both store Markdown with YAML frontmatter (`metadata.type` is
- * `feedback` | `reference` | `user`).
- */
-export interface MemoryAsset {
-  globalRoots?: string[]
-  /** Supports the `<项目>` placeholder, resolved from the session cwd. */
-  projectRoots?: string[]
-  format: 'markdown-frontmatter'
-}
-
 /** One built-in provider entry (`providers/<id>/provider.json`). Pure data. */
 export interface ProviderDescriptor {
   schemaVersion: 1
@@ -51,8 +39,8 @@ export interface ProviderDescriptor {
   name: string
   family: SourceFamily
   assets: {
+    /** Only sessions are supported: DSH has no consumer for anything else. */
     sessions?: SessionAsset
-    memory?: MemoryAsset
   }
   capabilities?: {
     resume?: boolean
@@ -60,18 +48,6 @@ export interface ProviderDescriptor {
     subagents?: boolean
     reasoning?: boolean
   }
-}
-
-/** One memory file discovered under a provider's memory roots. */
-export interface MemoryEntry {
-  providerId: string
-  /** `name` from the frontmatter, falling back to the file basename. */
-  name: string
-  description?: string
-  type?: string
-  sourcePath: string
-  bytes: number
-  mtimeMs: number
 }
 
 /** A normalized conversation event, independent of any tool's format. */

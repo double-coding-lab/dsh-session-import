@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/double-coding-lab/dsh-session-import/schema/provider.schema.json",
   "title": "dsh-session-import provider descriptor",
-  "description": "纯数据描述：一个第三方工具把会话与记忆放在哪、用什么格式族解析。新增工具不需要写代码。",
+  "description": "纯数据描述：一个第三方工具把会话放在哪、用什么格式族解析。新增工具不需要写代码。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "id", "name", "family", "assets"],
@@ -24,8 +24,7 @@
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
-        "sessions": { "$ref": "#/$defs/sessionsAsset" },
-        "memory": { "$ref": "#/$defs/memoryAsset" }
+        "sessions": { "$ref": "#/$defs/sessionsAsset" }
       }
     },
     "capabilities": {
@@ -84,23 +83,6 @@
             "fields": { "type": "array", "items": { "type": "string" } },
             "fromFirstUserMessage": { "type": "boolean" }
           }
-        }
-      }
-    },
-    "memoryAsset": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["format"],
-      "properties": {
-        "globalRoots": { "$ref": "#/$defs/paths" },
-        "projectRoots": {
-          "$ref": "#/$defs/paths",
-          "description": "支持 <项目> 占位符，按会话 cwd 解析"
-        },
-        "format": {
-          "type": "string",
-          "enum": ["markdown-frontmatter"],
-          "description": "记忆文件格式；目前只有带 YAML frontmatter 的 Markdown"
         }
       }
     }

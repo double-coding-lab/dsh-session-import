@@ -17,11 +17,6 @@
       },
       "cwd": { "from": "workspace-directories.directories[0]" },
       "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true }
-    },
-    "memory": {
-      "globalRoots": ["~/.qoder/memory"],
-      "projectRoots": ["~/.qoder/projects/<项目>/memory"],
-      "format": "markdown-frontmatter"
     }
   },
   "capabilities": { "resume": true, "images": true, "subagents": true, "reasoning": true }
