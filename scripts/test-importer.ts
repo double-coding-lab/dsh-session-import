@@ -32,9 +32,17 @@ interface StoredSession {
 class FakePersistence implements PersistencePort {
   readonly sessions = new Map<string, StoredSession>()
 
-  async create(header: { version: number; id: string; createdAt: number; cwd?: string; delegationDepth: number }): Promise<void> {
+  async create(header: {
+    version: number
+    id: string
+    createdAt: number
+    cwd?: string
+    isSeeded: boolean
+    delegationDepth: number
+  }): Promise<void> {
     if (this.sessions.has(header.id)) throw new Error(`create: 会话已存在 ${header.id}`)
     if (header.version !== 4) throw new Error(`create: 版本必须是 4，收到 ${header.version}`)
+    if (header.isSeeded !== false) throw new Error('create: 导入会话的 isSeeded 必须是 false')
     this.sessions.set(header.id, { header: { id: header.id, ...(header.cwd === undefined ? {} : { cwd: header.cwd }) }, events: [] })
   }
 

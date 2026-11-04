@@ -19,17 +19,26 @@ import { fingerprintOf, recordKey, sameFingerprint, type ImportStateStore } from
  */
 export const SESSION_FORMAT_VERSION = 4
 
+/** A storage handle for one session: DSH opens write/read sessions as handles. */
+export interface SessionHandle {
+  append(events: readonly DshEvent[]): Promise<void>
+  flush(): Promise<void>
+  close(): Promise<void>
+  read(offset?: number, length?: number): Promise<{ events: readonly { type: string; seq: number }[] }>
+}
+
 export interface PersistencePort {
   create(header: {
     version: number
     id: string
     createdAt: number
     cwd?: string
+    /** Fork lineage marker; DSH rejects a header that omits it. */
+    isSeeded: boolean
     delegationDepth: number
-  }): Promise<void>
-  append(id: string, events: readonly DshEvent[]): Promise<void>
-  /** Read the log back; the importer uses this as its own acceptance test. */
-  inspect(id: string): Promise<{ events: readonly { type: string; seq: number }[] }>
+  }): Promise<SessionHandle>
+  /** Read an existing log back; used as the importer's own acceptance test. */
+  open(id: string): Promise<SessionHandle>
 }
 
 export interface ImportDeps {
@@ -100,20 +109,8 @@ export async function importSession(
   const sessionId = existing?.dshSessionId ?? importedSessionId(parsed.providerId, parsed.sourceSessionId)
   const createdAt = parsed.startedAt ?? now()
 
-  if (existing === undefined) {
-    await deps.persistence.create({
-      version: SESSION_FORMAT_VERSION,
-      id: sessionId,
-      createdAt,
-      ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
-      delegationDepth: 0,
-    })
-  }
-  signal?.throwIfAborted()
-
   // Persistence requires a contiguous seq starting at the stored next value.
-  const base = existing === undefined ? 0 : undefined
-  if (base === undefined) {
+  if (existing !== undefined) {
     return {
       status: 'failed',
       providerId: parsed.providerId,
@@ -126,13 +123,36 @@ export async function importSession(
     }
   }
 
-  const rebased = mapped.events.map((event, index) => ({ ...event, seq: base + index }))
-  await deps.persistence.append(sessionId, rebased)
+  const handle = await deps.persistence.create({
+    version: SESSION_FORMAT_VERSION,
+    id: sessionId,
+    createdAt,
+    ...(parsed.cwd === undefined ? {} : { cwd: parsed.cwd }),
+    isSeeded: false,
+    delegationDepth: 0,
+  })
+  signal?.throwIfAborted()
+
+  const rebased = mapped.events.map((event, index) => ({ ...event, seq: index }))
+  try {
+    await handle.append(rebased)
+    await handle.flush()
+  } finally {
+    await handle.close()
+  }
   signal?.throwIfAborted()
 
   // Acceptance test: read the log back through the same loader users will use.
-  const view = await deps.persistence.inspect(sessionId)
-  if (view.events.length < rebased.length) {
+  let storedCount = 0
+  const readHandle = await deps.persistence.open(sessionId)
+  try {
+    const page = await readHandle.read()
+    storedCount = page.events.length
+  } finally {
+    await readHandle.close()
+  }
+
+  if (storedCount < rebased.length) {
     return {
       status: 'failed',
       providerId: parsed.providerId,
@@ -142,7 +162,7 @@ export async function importSession(
       events: rebased.length,
       truncated: mapped.truncated,
       repaired: mapped.repairedCalls,
-      message: `回读校验失败：写入 ${rebased.length} 条，读回 ${view.events.length} 条`,
+      message: `回读校验失败：写入 ${rebased.length} 条，读回 ${storedCount} 条`,
     }
   }
 

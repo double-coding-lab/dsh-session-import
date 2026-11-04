@@ -76,6 +76,8 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
   let estimatedChars = 0
 
   const openCalls = new Set<string>()
+  /** Call ids already advertised by an assistant message in this log. */
+  const advertised = new Set<string>()
 
   const push = (type: string, time: number, data: Record<string, unknown>, surface = false): void => {
     const event: DshEvent = { type, seq: seq++, time, data }
@@ -87,23 +89,20 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
     if (!stepOpen) return
     for (const callId of openCalls) {
       push('tool/result', time, {
+        turn,
+        step,
         message: {
           id: randomUUID(),
-          role: 'user',
+          role: 'tool',
+          toolCallId: callId,
           content: [
             {
-              type: 'tool-result',
-              toolCallId: callId,
-              content: [
-                {
-                  type: 'text',
-                  text: '（导入说明）该工具调用在源会话中未记录结果，可能被中断或被源工具压缩截断。',
-                },
-              ],
-              isError: true,
+              type: 'text',
+              text: '（导入说明）该工具调用在源会话中未记录结果，可能被中断或被源工具压缩截断。',
             },
           ],
           source: { kind: 'tool', callId },
+          isError: true,
         },
       }, true)
       repairedCalls += 1
@@ -123,6 +122,8 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
   const ensureTurn = (time: number): void => {
     if (turnOpen) return
     turn += 1
+    // Step numbering restarts per turn: DSH validates the next step as 1.
+    step = 0
     push('turn/start', time, { turn })
     turnOpen = true
   }
@@ -137,7 +138,8 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
 
   const windowed = windowEvents(source, options)
 
-  for (const event of windowed) {
+  for (let index = 0; index < windowed.length; index += 1) {
+    const event = windowed[index]!
     switch (event.kind) {
       case 'turn-boundary': {
         closeTurn(event.time)
@@ -149,12 +151,10 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
         push('user/message', event.time, {
-          message: {
-            id: randomUUID(),
-            role: 'user',
-            content: [{ type: 'text', text }],
-            source: { kind: 'user' },
-          },
+          id: randomUUID(),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'user' },
         }, true)
         break
       }
@@ -165,13 +165,27 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         ensureStep(event.time)
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
+        // DSH admits a tool/call only if an assistant message advertised it, so
+        // the calls that immediately follow ride along in this message.
+        const content: Record<string, unknown>[] = [{ type: 'text', text }]
+        for (let look = index + 1; look < windowed.length; look += 1) {
+          const next = windowed[look]!
+          if (next.kind !== 'tool-call') break
+          content.push({
+            type: 'tool-call',
+            id: next.callId,
+            name: next.name,
+            arguments: truncate(next.args, options.perTextLimit, truncated),
+          })
+          advertised.add(next.callId)
+        }
         push('assistant/message', event.time, {
           turn,
           step,
           message: {
             id: randomUUID(),
             role: 'assistant',
-            content: [{ type: 'text', text }],
+            content,
             source: {
               kind: 'model',
               provider: 'session-import',
@@ -204,6 +218,32 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
       }
       case 'tool-call': {
         ensureStep(event.time)
+        // A tool-only model turn has no assistant text to carry the block, so
+        // advertise the call here before the call event itself.
+        if (!advertised.has(event.callId)) {
+          const blocks: Record<string, unknown>[] = []
+          for (let look = index; look < windowed.length; look += 1) {
+            const next = windowed[look]!
+            if (next.kind !== 'tool-call') break
+            blocks.push({
+              type: 'tool-call',
+              id: next.callId,
+              name: next.name,
+              arguments: truncate(next.args, options.perTextLimit, truncated),
+            })
+            advertised.add(next.callId)
+          }
+          push('assistant/message', event.time, {
+            turn,
+            step,
+            message: {
+              id: randomUUID(),
+              role: 'assistant',
+              content: blocks,
+              source: { kind: 'model', provider: 'session-import', model: 'unknown' },
+            },
+          }, true)
+        }
         openCalls.add(event.callId)
         const args = truncate(event.args, options.perTextLimit, truncated)
         estimatedChars += args.length
@@ -231,16 +271,11 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           step,
           message: {
             id: randomUUID(),
-            role: 'user',
-            content: [
-              {
-                type: 'tool-result',
-                toolCallId: event.callId,
-                content: [{ type: 'text', text }],
-                ...(event.isError === true ? { isError: true } : {}),
-              },
-            ],
+            role: 'tool',
+            toolCallId: event.callId,
+            content: [{ type: 'text', text }],
             source: { kind: 'tool', callId: event.callId },
+            ...(event.isError === true ? { isError: true } : {}),
           },
         }, true)
         break

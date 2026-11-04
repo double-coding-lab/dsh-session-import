@@ -24,9 +24,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./client": {
-      "default": "./dist/client.js"
-    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -40,10 +37,6 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web",
-      "inject": []
     }
   },
   "scripts": {
