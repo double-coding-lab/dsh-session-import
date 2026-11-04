@@ -2,7 +2,7 @@
  * Host-side service layer: provider discovery, session scanning, and the real
  * import run against DSH's own persistence.
  */
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -101,6 +101,60 @@ export async function scanProvider(
 /** Read the idempotency ledger (missing/corrupt file reads as empty). */
 export async function loadRecords(): Promise<Record<string, ImportRecord>> {
   return new ImportStateStore(join(dshHome(), 'session-import', 'state.json')).load()
+}
+
+export interface RetractResult {
+  providerId: string
+  sourceSessionId: string
+  dshSessionId: string
+  removedPaths: string[]
+}
+
+/**
+ * Delete an imported session and its bookkeeping.
+ *
+ * DSH exposes no delete API, so this removes the session directory. Safety is
+ * deliberate: only ids this plugin created (`import-` prefix) may be removed,
+ * and only when the ledger has a record for them.
+ */
+export async function retractImport(providerId: string, sourceSessionId: string): Promise<RetractResult> {
+  const store = new ImportStateStore(join(dshHome(), 'session-import', 'state.json'))
+  const record = (await store.load())[recordKey(providerId, sourceSessionId)]
+  if (record === undefined) throw new Error('没有导入记录，无法撤回')
+  if (!record.dshSessionId.startsWith('import-')) {
+    throw new Error(`拒绝删除非本插件创建的会话：${record.dshSessionId}`)
+  }
+
+  const removedPaths: string[] = []
+  const sessionsRoot = join(dshHome(), 'sessions')
+  let projectDirs: string[] = []
+  try {
+    projectDirs = (await readdir(sessionsRoot, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory())
+      .map(entry => join(sessionsRoot, entry.name))
+  } catch {
+    projectDirs = []
+  }
+
+  for (const projectDir of projectDirs) {
+    const candidate = join(projectDir, record.dshSessionId)
+    try {
+      const info = await stat(candidate)
+      if (!info.isDirectory()) continue
+      await rm(candidate, { recursive: true, force: true })
+      removedPaths.push(candidate)
+    } catch {
+      // not in this project
+    }
+  }
+
+  await store.remove(providerId, sourceSessionId)
+  return {
+    providerId,
+    sourceSessionId,
+    dshSessionId: record.dshSessionId,
+    removedPaths,
+  }
 }
 
 /** DSH-side home, used for the idempotency ledger. */

@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImportOptions, ProviderDescriptor } from './shared/types.ts'
 import { DEFAULT_IMPORT_OPTIONS } from './shared/types.ts'
 import type { PersistencePort, SessionHandle } from './host/importer.ts'
-import { loadRecords, runImport, scanProvider } from './host/service.ts'
+import { loadRecords, retractImport, runImport, scanProvider } from './host/service.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { version: string }
@@ -162,6 +162,19 @@ export function apply(ctx: Context): () => void {
             options: importOptionsFrom(body),
           })
           sendJson(res, 200, { ok: result.status !== 'failed', result })
+          return
+        }
+
+        if (path === `${ROUTE_PREFIX}/api/retract` && req.method === 'POST') {
+          const body = await readJson(req)
+          const providerId = typeof body.providerId === 'string' ? body.providerId : ''
+          const sourceSessionId = typeof body.sourceSessionId === 'string' ? body.sourceSessionId : ''
+          if (providerId === '' || sourceSessionId === '') {
+            sendJson(res, 400, { ok: false, error: 'providerId 与 sourceSessionId 必填' })
+            return
+          }
+          const result = await retractImport(providerId, sourceSessionId)
+          sendJson(res, 200, { ok: true, result })
           return
         }
 

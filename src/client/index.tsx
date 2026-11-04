@@ -125,6 +125,22 @@ function Section(): React.ReactElement {
     [selected],
   )
 
+  const retract = useCallback(async (providerId: string, sessionId: string) => {
+    try {
+      setStatus('正在撤回…')
+      const response = await fetch(`${API}/retract`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ providerId, sourceSessionId: sessionId }),
+      })
+      const payload = (await response.json()) as { ok?: boolean; error?: string }
+      setStatus(payload.ok === true ? `已撤回 ${sessionId.slice(0, 8)}` : `撤回失败：${payload.error ?? ''}`)
+      void load()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }, [load])
+
   const runImport = useCallback(async () => {
     setBusy(true)
     setError('')
@@ -210,6 +226,19 @@ function Section(): React.ReactElement {
                       <span className="dsi-id">{item.sourceSessionId.slice(0, 8)}</span>
                       <span className={`dsi-badge dsi-badge-${item.status}`}>{BADGE[item.status]}</span>
                       <span className="dsi-desc">{mb(item.bytes)} · {tokens(item.bytes)} · {day(item.mtimeMs)}</span>
+                      {item.status !== 'new' && (
+                        <button
+                          className="dsi-link"
+                          type="button"
+                          onClick={event => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            void retract(provider.id, item.sourceSessionId)
+                          }}
+                        >
+                          撤回
+                        </button>
+                      )}
                     </label>
                   </li>
                 ))}
@@ -278,6 +307,8 @@ function installStyles(): void {
 .dsi-badge-imported{color:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
 .dsi-badge-grown{color:var(--dsw-alias-state-warning-primary,#b26a00);border-color:var(--dsw-alias-state-warning-primary,#b26a00)}
 .dsi-badge-failed{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
+.dsi-link{margin-left:auto;background:none;border:0;padding:0;color:var(--dsw-alias-state-business-primary);font:inherit;font-size:12px;cursor:pointer}
+.dsi-link:hover{text-decoration:underline}
 `
   document.head.appendChild(style)
 }
