@@ -32,6 +32,15 @@ interface ScannedSession {
   sourcePath: string
   bytes: number
   mtimeMs: number
+  status: 'new' | 'imported' | 'grown' | 'failed'
+  dshSessionId?: string
+}
+
+const BADGE: Record<ScannedSession['status'], string> = {
+  new: '未导入',
+  imported: '已导入',
+  grown: '有新增',
+  failed: '失败',
 }
 
 interface ImportResultView {
@@ -199,6 +208,7 @@ function Section(): React.ReactElement {
                         onChange={() => toggle(provider.id, item.sourceSessionId)}
                       />
                       <span className="dsi-id">{item.sourceSessionId.slice(0, 8)}</span>
+                      <span className={`dsi-badge dsi-badge-${item.status}`}>{BADGE[item.status]}</span>
                       <span className="dsi-desc">{mb(item.bytes)} · {tokens(item.bytes)} · {day(item.mtimeMs)}</span>
                     </label>
                   </li>
@@ -264,6 +274,10 @@ function installStyles(): void {
 .dsi-primary:disabled{opacity:.5;cursor:not-allowed}
 .dsi-primary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .dsi-error{color:var(--dsw-alias-state-error-primary);font-size:13px}
+.dsi-badge{font-size:11px;line-height:18px;padding:0 6px;border-radius:var(--dsw-radius-sm);border:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}
+.dsi-badge-imported{color:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
+.dsi-badge-grown{color:var(--dsw-alias-state-warning-primary,#b26a00);border-color:var(--dsw-alias-state-warning-primary,#b26a00)}
+.dsi-badge-failed{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
 `
   document.head.appendChild(style)
 }

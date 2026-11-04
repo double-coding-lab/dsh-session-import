@@ -6,10 +6,10 @@ import { readdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
-import type { ImportOptions, ImportResult, ProviderDescriptor } from '../shared/types.ts'
+import type { ImportOptions, ImportRecord, ImportResult, ProviderDescriptor } from '../shared/types.ts'
 import { importSession, type PersistencePort } from './importer.ts'
 import { parseClaudeJsonl } from './parsers/claude-jsonl.ts'
-import { ImportStateStore } from './state.ts'
+import { ImportStateStore, recordKey } from './state.ts'
 
 /** Expand a `~`-prefixed path against the current user's home. */
 export function expandHome(path: string): string {
@@ -30,13 +30,19 @@ export interface ScannedSession {
   directory: string
   bytes: number
   mtimeMs: number
+  /** Import state, from the idempotency ledger. */
+  status: 'new' | 'imported' | 'grown' | 'failed'
+  dshSessionId?: string
 }
 
 /**
  * List candidate transcripts. Metadata only — no parsing, so the panel opens
  * instantly even with hundreds of files.
  */
-export async function scanProvider(provider: ProviderDescriptor): Promise<ScannedSession[]> {
+export async function scanProvider(
+  provider: ProviderDescriptor,
+  records: Record<string, ImportRecord> = {},
+): Promise<ScannedSession[]> {
   const glob = provider.assets.sessions?.layout.sessionGlob ?? '*/*.jsonl'
   const depth = glob.split('/').length - 1
   const out: ScannedSession[] = []
@@ -61,13 +67,26 @@ export async function scanProvider(provider: ProviderDescriptor): Promise<Scanne
       for (const file of files) {
         try {
           const info = await stat(file)
+          const snapshot = { bytes: info.size, mtimeMs: info.mtimeMs }
+          const sessionId = basename(file, '.jsonl')
+          const record = records[recordKey(provider.id, sessionId)]
+          const status: ScannedSession['status'] =
+            record === undefined
+              ? 'new'
+              : record.status === 'failed'
+                ? 'failed'
+                : record.fingerprint.bytes === snapshot.bytes && record.fingerprint.mtimeMs === snapshot.mtimeMs
+                  ? 'imported'
+                  : 'grown'
           out.push({
             providerId: provider.id,
             sourcePath: file,
-            sourceSessionId: basename(file, '.jsonl'),
+            sourceSessionId: sessionId,
             directory: dir,
             bytes: info.size,
             mtimeMs: info.mtimeMs,
+            status,
+            ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
           })
         } catch {
           // ignore unreadable entries
@@ -77,6 +96,11 @@ export async function scanProvider(provider: ProviderDescriptor): Promise<Scanne
   }
 
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+/** Read the idempotency ledger (missing/corrupt file reads as empty). */
+export async function loadRecords(): Promise<Record<string, ImportRecord>> {
+  return new ImportStateStore(join(dshHome(), 'session-import', 'state.json')).load()
 }
 
 /** DSH-side home, used for the idempotency ledger. */

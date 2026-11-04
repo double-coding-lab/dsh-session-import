@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImportOptions, ProviderDescriptor } from './shared/types.ts'
 import { DEFAULT_IMPORT_OPTIONS } from './shared/types.ts'
 import type { PersistencePort, SessionHandle } from './host/importer.ts'
-import { runImport, scanProvider } from './host/service.ts'
+import { loadRecords, runImport, scanProvider } from './host/service.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { version: string }
@@ -137,7 +137,8 @@ export function apply(ctx: Context): () => void {
             sendJson(res, 400, { ok: false, error: 'unknown-provider', providerId })
             return
           }
-          const sessions = await scanProvider(provider)
+          const records = await loadRecords()
+          const sessions = await scanProvider(provider, records)
           sendJson(res, 200, { ok: true, providerId, count: sessions.length, sessions })
           return
         }

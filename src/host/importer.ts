@@ -11,7 +11,7 @@ import { createInterface } from 'node:readline'
 
 import type { ImportOptions, ImportRecord, ImportResult, ParsedSession } from '../shared/types.ts'
 import { mapToDshEvents, type DshEvent } from './mapper.ts'
-import { fingerprintOf, recordKey, sameFingerprint, type ImportStateStore } from './state.ts'
+import { fingerprintOf, recordKey, sameFingerprint, type ImportStateStore, type SourceFingerprint } from './state.ts'
 
 /**
  * DSH stamps this into every session header; a backend rejects any other value
@@ -63,6 +63,12 @@ async function readHead(path: string): Promise<string> {
     lines.close()
     stream.destroy()
   }
+}
+
+/** Fingerprint a source file without parsing it (stat + head hash). */
+export async function fingerprintSource(path: string): Promise<SourceFingerprint> {
+  const info = await stat(path)
+  return fingerprintOf(info.size, info.mtimeMs, await readHead(path))
 }
 
 export async function importSession(
