@@ -24,6 +24,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./client": {
+      "default": "./dist/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -37,10 +40,15 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
     }
   },
   "scripts": {
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/index.js --external:@deepseek-ai/cordis",
+    "build:client": "esbuild src/client/index.tsx --bundle --platform=browser --format=esm --target=es2022 --jsx=automatic --outfile=dist/client.js --external:react --external:react-dom --external:@deepseek-ai/cordis",
     "typecheck": "tsc --noEmit",
     "analyze": "node scripts/analyze.ts",
     "check": "npm run typecheck && node scripts/check-providers.mjs"
