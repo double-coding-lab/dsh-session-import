@@ -54,8 +54,8 @@ function loadProviders(): ProviderSummary[] {
   }
 }
 
-interface RouterFace {
-  register(options: {
+interface RouteFace {
+  register(route: {
     kind: 'prefix' | 'exact'
     path: string
     handler: (req: unknown, res: unknown) => void | Promise<void>
@@ -64,15 +64,15 @@ interface RouterFace {
 
 export function apply(ctx: Context): () => void {
   const loose = ctx as Context & { get?: (service: string) => unknown }
-  const webServer = loose.get?.('webServer') as { router?: RouterFace } | undefined
-  const router = webServer?.router
+  // `webServer` is the WebServer service itself; routes register on it directly.
+  const webServer = loose.get?.('webServer') as RouteFace | undefined
 
-  if (router === undefined) {
-    console.warn('[dsh-session-import] webServer.router 不可用，HTTP 接口未挂载')
+  if (typeof webServer?.register !== 'function') {
+    console.warn('[dsh-session-import] webServer 服务不可用，HTTP 接口未挂载')
     return () => {}
   }
 
-  const dispose = router.register({
+  const dispose = webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
     handler: (req, res) => {
