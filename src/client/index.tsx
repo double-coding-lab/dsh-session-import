@@ -68,20 +68,23 @@ function day(ms: number): string {
 
 /** Official chevron: points right when collapsed, down when expanded. */
 function Chevron({ open }: { open: boolean }): React.ReactElement {
+  // Verbatim copy of the official settings chevron: 12px box, 16 viewBox,
+  // stroke-width 1, rounded corners baked into the path.
   return (
     <svg
+      width="12"
+      height="12"
       className={`dsi-chevron${open ? ' dsi-chevron-open' : ''}`}
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
+      viewBox="0 0 16 16"
       fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      xmlns="http://www.w3.org/2000/svg"
       aria-hidden
+      strokeWidth="1"
     >
-      <path d="m6 9 6 6 6-6" />
+      <path
+        d="M4 6L7.29289 9.29289C7.68342 9.68342 8.31658 9.68342 8.70711 9.29289L12 6"
+        stroke="currentColor"
+      />
     </svg>
   )
 }
