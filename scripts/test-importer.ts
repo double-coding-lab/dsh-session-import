@@ -48,8 +48,8 @@ class FakeHandle implements SessionHandle {
 
   async close(): Promise<void> {}
 
-  async read(): Promise<{ events: readonly { type: string; seq: number }[] }> {
-    return { events: this.#session.events.map(event => ({ type: event.type, seq: event.seq })) }
+  async read(): Promise<{ events: readonly DshEvent[] }> {
+    return { events: this.#session.events }
   }
 }
 
@@ -75,7 +75,7 @@ class FakePersistence implements PersistencePort {
     return new FakeHandle(session)
   }
 
-  async open(id: string): Promise<SessionHandle> {
+  async open(id: string, _access?: 'read' | 'write'): Promise<SessionHandle> {
     const session = this.sessions.get(id)
     if (session === undefined) throw new Error(`open: 会话不存在 ${id}`)
     return new FakeHandle(session)

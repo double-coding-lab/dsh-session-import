@@ -112,6 +112,10 @@ export interface ImportRecord {
   fingerprint: { bytes: number; mtimeMs: number; headHash: string }
   dshSessionId: string
   importedTurns: number
+  /** How many DSH events have been written; the append cursor for growth. */
+  importedEventCount: number
+  /** Hash of the leading events, to detect a source window that slid. */
+  prefixHash: string
   importedAt: number
   lastImportAt: number
   status: 'ok' | 'partial' | 'failed'

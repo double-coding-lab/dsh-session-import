@@ -12,7 +12,6 @@
  *    own compaction window, so per-text truncation and turn windows must apply
  *    here, not merely be configurable.
  */
-import { randomUUID } from 'node:crypto'
 
 import type { ImportOptions, SourceEvent } from '../shared/types.ts'
 
@@ -76,6 +75,9 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
   let estimatedChars = 0
 
   const openCalls = new Set<string>()
+  /** Deterministic message ids keep re-mapping byte-identical (needed for the growth prefix hash). */
+  let messageSeq = 0
+  const nextMessageId = (): string => `imp-${(messageSeq += 1)}`
   /** Call ids already advertised by an assistant message in this log. */
   const advertised = new Set<string>()
 
@@ -92,7 +94,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         turn,
         step,
         message: {
-          id: randomUUID(),
+          id: nextMessageId(),
           role: 'tool',
           toolCallId: callId,
           content: [
@@ -151,7 +153,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
         push('user/message', event.time, {
-          id: randomUUID(),
+          id: nextMessageId(),
           role: 'user',
           content: [{ type: 'text', text }],
           source: { kind: 'user' },
@@ -183,7 +185,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           turn,
           step,
           message: {
-            id: randomUUID(),
+            id: nextMessageId(),
             role: 'assistant',
             content,
             source: {
@@ -208,7 +210,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           turn,
           step,
           message: {
-            id: randomUUID(),
+            id: nextMessageId(),
             role: 'assistant',
             content: [{ type: 'reasoning', text }],
             source: { kind: 'model', provider: 'session-import', model: 'unknown' },
@@ -237,7 +239,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
             turn,
             step,
             message: {
-              id: randomUUID(),
+              id: nextMessageId(),
               role: 'assistant',
               content: blocks,
               source: { kind: 'model', provider: 'session-import', model: 'unknown' },
@@ -270,7 +272,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           turn,
           step,
           message: {
-            id: randomUUID(),
+            id: nextMessageId(),
             role: 'tool',
             toolCallId: event.callId,
             content: [{ type: 'text', text }],

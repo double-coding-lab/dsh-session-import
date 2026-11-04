@@ -5,6 +5,7 @@
  * runs (and is tested) outside a DSH process. Inside DSH the port is a thin
  * adapter over `ctx.sessionPersistence`.
  */
+import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
@@ -24,7 +25,7 @@ export interface SessionHandle {
   append(events: readonly DshEvent[]): Promise<void>
   flush(): Promise<void>
   close(): Promise<void>
-  read(offset?: number, length?: number): Promise<{ events: readonly { type: string; seq: number }[] }>
+  read(offset?: number, length?: number): Promise<{ events: readonly DshEvent[] }>
 }
 
 export interface PersistencePort {
@@ -37,8 +38,8 @@ export interface PersistencePort {
     isSeeded: boolean
     delegationDepth: number
   }): Promise<SessionHandle>
-  /** Read an existing log back; used as the importer's own acceptance test. */
-  open(id: string): Promise<SessionHandle>
+  /** Read or open-for-append an existing log. */
+  open(id: string, access?: 'read' | 'write'): Promise<SessionHandle>
 }
 
 export interface ImportDeps {
@@ -69,6 +70,18 @@ async function readHead(path: string): Promise<string> {
 export async function fingerprintSource(path: string): Promise<SourceFingerprint> {
   const info = await stat(path)
   return fingerprintOf(info.size, info.mtimeMs, await readHead(path))
+}
+
+/**
+ * Hash the leading events of a mapped log. Two mappings of the same source
+ * produce the same prefix; a slid window does not.
+ */
+export function prefixHashOf(events: readonly DshEvent[], count = 64): string {
+  const slice = events.slice(0, Math.min(count, events.length))
+  return createHash('sha256')
+    .update(JSON.stringify(slice.map(event => [event.type, event.seq, event.data])))
+    .digest('hex')
+    .slice(0, 16)
 }
 
 export async function importSession(
@@ -115,17 +128,83 @@ export async function importSession(
   const sessionId = existing?.dshSessionId ?? importedSessionId(parsed.providerId, parsed.sourceSessionId)
   const createdAt = parsed.startedAt ?? now()
 
-  // Persistence requires a contiguous seq starting at the stored next value.
+  // Growth: append only what the source added since the last import. A source
+  // window that slid (compaction, truncation) changes the prefix, which makes
+  // appending unsafe — refuse instead of corrupting the log.
   if (existing !== undefined) {
+    // Legacy records predate the append cursor; recover it from the stored log.
+    let previous = existing.importedEventCount
+    let previousHash = existing.prefixHash
+    if (previous === undefined || previousHash === undefined) {
+      const probe = await deps.persistence.open(existing.dshSessionId, 'read')
+      try {
+        const page = await probe.read()
+        previous = page.events.length
+        previousHash = prefixHashOf(page.events, Math.min(64, previous))
+      } finally {
+        await probe.close()
+      }
+    }
+    const hash = prefixHashOf(mapped.events, Math.min(64, previous))
+    if (previousHash !== hash) {
+      await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+      return {
+        status: 'failed',
+        providerId: parsed.providerId,
+        sourceSessionId: parsed.sourceSessionId,
+        dshSessionId: existing.dshSessionId,
+        turns: 0,
+        events: 0,
+        truncated: mapped.truncated,
+        repaired: mapped.repairedCalls,
+        message: '源会话窗口已前移，无法增量追加；请先撤回再重新导入',
+      }
+    }
+
+    if (mapped.events.length <= previous) {
+      await deps.state.upsert({ ...existing, fingerprint, lastImportAt: now() })
+      return {
+        status: 'skipped',
+        providerId: parsed.providerId,
+        sourceSessionId: parsed.sourceSessionId,
+        dshSessionId: existing.dshSessionId,
+        turns: 0,
+        events: 0,
+        truncated: mapped.truncated,
+        repaired: mapped.repairedCalls,
+        message: '没有新增事件',
+      }
+    }
+
+    const tail = mapped.events.slice(previous).map((event, index) => ({ ...event, seq: previous + index }))
+    const writeHandle = await deps.persistence.open(existing.dshSessionId, 'write')
+    try {
+      await writeHandle.append(tail)
+      await writeHandle.flush()
+    } finally {
+      await writeHandle.close()
+    }
+
+    await deps.state.upsert({
+      ...existing,
+      fingerprint,
+      importedTurns: mapped.turns,
+      importedEventCount: previous + tail.length,
+      prefixHash: prefixHashOf(mapped.events, Math.min(64, previous + tail.length)),
+      lastImportAt: now(),
+      status: 'ok',
+    })
+
     return {
-      status: 'failed',
+      status: 'imported',
       providerId: parsed.providerId,
       sourceSessionId: parsed.sourceSessionId,
-      turns: 0,
-      events: 0,
+      dshSessionId: existing.dshSessionId,
+      turns: mapped.turns,
+      events: tail.length,
       truncated: mapped.truncated,
       repaired: mapped.repairedCalls,
-      message: '源会话已增长，增量追平尚未实现（M2）',
+      message: `增量追加 ${tail.length} 条事件`,
     }
   }
 
@@ -179,6 +258,8 @@ export async function importSession(
     fingerprint,
     dshSessionId: sessionId,
     importedTurns: mapped.turns,
+    importedEventCount: rebased.length,
+    prefixHash: prefixHashOf(rebased, rebased.length),
     importedAt: now(),
     lastImportAt: now(),
     status: 'ok',

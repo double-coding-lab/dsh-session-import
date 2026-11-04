@@ -98,7 +98,7 @@ export function apply(ctx: Context): () => void {
       ? undefined
       : {
           create: header => rawPersistence.create(header),
-          open: id => rawPersistence.open(id, 'read'),
+          open: (id, access) => rawPersistence.open(id, access ?? 'read'),
         }
 
   if (typeof webServer?.register !== 'function') {
