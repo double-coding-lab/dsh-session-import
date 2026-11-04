@@ -69,18 +69,110 @@ function blockText(content: unknown): string {
 }
 
 /** Rebuild the linear mainline ending at `leafUuid`, following `parentUuid`. */
-function mainlineOf(byUuid: Map<string, RawRecord>, leafUuid: string | undefined): RawRecord[] {
-  if (!leafUuid) return []
+/** Message records can anchor a chain segment; metadata records cannot. */
+function isMessageRecord(record: RawRecord): boolean {
+  return record.type === 'user' || record.type === 'assistant'
+}
+
+/**
+ * Every record reachable from `leaf` by walking parents, oldest first.
+ * Stops at a compaction point: the source tool writes those with
+ * `parentUuid: null`, so the chain before it is a separate segment.
+ */
+function walkUp(leaf: RawRecord | undefined, byUuid: Map<string, RawRecord>, seen: Set<string>): RawRecord[] {
   const chain: RawRecord[] = []
-  const seen = new Set<string>()
-  let current = byUuid.get(leafUuid)
+  let current = leaf
   while (current && current.uuid && !seen.has(current.uuid)) {
     seen.add(current.uuid)
     chain.push(current)
-    const parent = typeof current.parentUuid === 'string' ? byUuid.get(current.parentUuid) : undefined
-    current = parent
+    current = typeof current.parentUuid === 'string' ? byUuid.get(current.parentUuid) : undefined
   }
-  return chain.reverse()
+  return chain
+}
+
+/** The newest unseen segment root that starts before `limit` (timestamp ms). */
+function newestRootBefore(
+  byUuid: Map<string, RawRecord>,
+  seen: Set<string>,
+  limit: number,
+): RawRecord | undefined {
+  let best: RawRecord | undefined
+  let bestTime = Number.NEGATIVE_INFINITY
+  for (const record of byUuid.values()) {
+    if (record.uuid === undefined || seen.has(record.uuid)) continue
+    if (typeof record.parentUuid === 'string' && byUuid.has(record.parentUuid)) continue
+    if (!isMessageRecord(record)) continue
+    const time = toTime(record.timestamp)
+    if (time === undefined || time >= limit || time <= bestTime) continue
+    best = record
+    bestTime = time
+  }
+  return best
+}
+
+/**
+ * Follow one segment forward from `root`, always taking the newest child, and
+ * stop before `limit`. Abandoned branches are not followed: only the path that
+ * actually carried the conversation survives.
+ */
+function walkDown(
+  root: RawRecord,
+  childrenOf: Map<string, RawRecord[]>,
+  seen: Set<string>,
+  limit: number,
+): RawRecord[] {
+  const segment: RawRecord[] = []
+  let current: RawRecord | undefined = root
+  while (current && current.uuid && !seen.has(current.uuid)) {
+    seen.add(current.uuid)
+    segment.push(current)
+    const kids = (childrenOf.get(current.uuid) ?? [])
+      .filter(child => child.uuid !== undefined && !seen.has(child.uuid))
+      .map(child => ({ child, time: toTime(child.timestamp) ?? Number.POSITIVE_INFINITY }))
+      .filter(entry => entry.time < limit)
+      .sort((left, right) => right.time - left.time)
+    current = kids[0]?.child
+  }
+  return segment
+}
+
+/**
+ * Reassemble the whole conversation, not just the chain behind the active leaf.
+ *
+ * A source tool that compacts its context rewrites the transcript so the
+ * post-compaction records hang off a **new root** — walking parents from the
+ * active leaf then reaches nothing but the turns after the last compaction.
+ * Importing that would silently drop most of the history, so we prepend every
+ * earlier segment (newest first) until no older root is left.
+ */
+function mainlineOf(byUuid: Map<string, RawRecord>, leafUuid: string | undefined): RawRecord[] {
+  if (!leafUuid) return []
+  const childrenOf = new Map<string, RawRecord[]>()
+  for (const record of byUuid.values()) {
+    if (record.uuid === undefined || typeof record.parentUuid !== 'string') continue
+    const list = childrenOf.get(record.parentUuid) ?? []
+    list.push(record)
+    childrenOf.set(record.parentUuid, list)
+  }
+
+  const seen = new Set<string>()
+  const segments: RawRecord[][] = []
+
+  const active = walkUp(byUuid.get(leafUuid), byUuid, seen).reverse()
+  if (active.length === 0) return []
+  segments.push(active)
+  let limit = toTime(active[0]?.timestamp) ?? Number.POSITIVE_INFINITY
+
+  for (let guard = 0; guard < 64; guard += 1) {
+    const root = newestRootBefore(byUuid, seen, limit)
+    if (root === undefined) break
+    const earlier = walkDown(root, childrenOf, seen, limit)
+    if (earlier.length === 0) break
+    segments.unshift(earlier)
+    limit = toTime(earlier[0]?.timestamp) ?? limit
+  }
+
+  return segments.flat()
 }
 
 /** Openers of synthetic context the source tool injected as a user message. */
@@ -189,17 +281,10 @@ export async function parseClaudeJsonl(
   const mainline = mainlineOf(byUuid, leafUuid)
   stats.mainlineRecords = mainline.length
 
-  // Window mode: start at the newest compaction boundary the tool itself wrote.
-  let startIndex = 0
-  if (!options.includeFullHistory) {
-    for (let index = mainline.length - 1; index >= 0; index -= 1) {
-      const record = mainline[index]
-      if (record?.type === 'system' && record.subtype === 'compact_boundary') {
-        startIndex = index
-        break
-      }
-    }
-  }
+  // Full history: the entire mainline, from the first record on. Compaction is
+  // dsh's job once the session is imported; pre-trimming here would silently
+  // hand the user a partial session.
+  const startIndex = 0
 
   const events: SourceEvent[] = []
   let startedAt: number | undefined

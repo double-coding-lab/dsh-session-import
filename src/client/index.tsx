@@ -97,62 +97,6 @@ function Check(): React.ReactElement {
   )
 }
 
-/** Native-style selector: pill trigger + elevated popup with a check on the value. */
-function Selector<T extends string>(props: {
-  value: T
-  options: readonly { value: T; label: string }[]
-  onChange: (value: T) => void
-}): React.ReactElement {
-  const [open, setOpen] = useState(false)
-  const box = useRef<HTMLDivElement | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (event: MouseEvent): void => {
-      if (box.current !== null && !box.current.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  const current = props.options.find(option => option.value === props.value)
-
-  return (
-    <div className="dsi-picker" ref={box}>
-      <button
-        className="dsi-switcher"
-        type="button"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen(value => !value)}
-      >
-        <span className="dsi-switcher-label">{current?.label ?? props.value}</span>
-        <Chevron open={open} />
-      </button>
-      {open && (
-        <div className="dsi-menu" role="listbox">
-          {props.options.map(option => (
-            <button
-              key={option.value}
-              className="dsi-menu-item"
-              type="button"
-              role="option"
-              aria-selected={option.value === props.value}
-              onClick={() => {
-                props.onChange(option.value)
-                setOpen(false)
-              }}
-            >
-              <span>{option.label}</span>
-              {option.value === props.value && <span className="dsi-menu-check"><Check /></span>}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(`${API}${path}`)
   if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -164,7 +108,6 @@ function Section(): React.ReactElement {
   const [sessions, setSessions] = useState<Record<string, ScannedSession[]>>({})
   const [expanded, setExpanded] = useState<string | undefined>()
   const [selected, setSelected] = useState<Record<string, Set<string>>>({})
-  const [fidelity, setFidelity] = useState<'window' | 'full'>('window')
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [status, setStatus] = useState<string>('')
@@ -245,7 +188,7 @@ function Section(): React.ReactElement {
           const response = await fetch(`${API}/import`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ providerId: provider.id, sourcePath: target.sourcePath, fidelity }),
+            body: JSON.stringify({ providerId: provider.id, sourcePath: target.sourcePath }),
           })
           const payload = (await response.json()) as { result?: ImportResultView; error?: string }
           results.push(payload.result ?? { status: 'failed', sourceSessionId: sessionId, message: payload.error })
@@ -261,7 +204,7 @@ function Section(): React.ReactElement {
     } finally {
       setBusy(false)
     }
-  }, [fidelity, load, providers, selected, sessions])
+  }, [load, providers, selected, sessions])
 
   return (
     <div className="dsi-section">
@@ -343,21 +286,6 @@ function Section(): React.ReactElement {
         )
       })}
 
-      <div className="dsi-row">
-        <div className="dsi-row-text">
-          <div className="dsi-row-title">保真度</div>
-          <div className="dsi-row-desc">可续聊窗口只带最近一段对话，完整历史包含全部内容。</div>
-        </div>
-        <Selector
-          value={fidelity}
-          options={[
-            { value: 'window', label: '可续聊窗口' },
-            { value: 'full', label: '完整历史' },
-          ]}
-          onChange={setFidelity}
-        />
-      </div>
-
       {error !== '' && <p className="dsi-error">{error}</p>}
 
       <div className="dsi-footer">
@@ -378,8 +306,7 @@ function Section(): React.ReactElement {
           <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label="确认导入" onClick={event => event.stopPropagation()}>
             <h2>确认导入</h2>
             <p>
-              将导入 {totalSelected} 个会话，保真度「{fidelity === 'window' ? '可续聊窗口' : '完整历史'}」。
-              导入后会出现在左侧会话列表，可直接继续对话。
+              将导入 {totalSelected} 个会话的完整历史。导入后会出现在左侧会话列表，可直接继续对话。
             </p>
             <div className="dsi-dialog-actions">
               <button className="dsi-ghost" type="button" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
@@ -448,15 +375,6 @@ function installStyles(): void {
 .dsi-row-title{font-size:14px;font-weight:400;line-height:22px;color:var(--dsw-alias-label-primary)}
 .dsi-row-desc{font-size:12px;font-weight:400;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 
-.dsi-picker{position:relative;flex:none}
-.dsi-switcher{display:inline-flex;align-items:center;gap:12px;height:36px;white-space:nowrap;border:none;border-radius:var(--dsw-radius-md);padding:0 14px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
-@media (hover: hover){.dsi-switcher:hover{background:var(--dsw-alias-interactive-bg-hover)}}
-.dsi-switcher:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
-.dsi-switcher-label{max-width:240px;overflow:hidden;text-overflow:ellipsis}
-.dsi-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;min-width:180px;display:flex;flex-direction:column;gap:2px;padding:6px;border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-prominent)}
-.dsi-menu-item{display:flex;align-items:center;justify-content:space-between;gap:12px;height:36px;padding:0 10px;border:0;border-radius:var(--dsw-radius-md);background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer;text-align:left}
-.dsi-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.dsi-menu-check{flex:none;display:inline-flex;color:var(--dsw-alias-label-primary)}
 
 .dsi-footer{display:flex;align-items:center;gap:12px;padding-top:14px}
 .dsi-meta-inline{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}

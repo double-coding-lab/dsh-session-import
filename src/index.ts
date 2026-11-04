@@ -76,8 +76,6 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 function importOptionsFrom(body: Record<string, unknown>): ImportOptions {
   return {
     ...DEFAULT_IMPORT_OPTIONS,
-    fidelity: body.fidelity === 'full' ? 'full' : 'window',
-    maxTurns: typeof body.maxTurns === 'number' ? body.maxTurns : DEFAULT_IMPORT_OPTIONS.maxTurns,
     keepReasoning: body.keepReasoning === true,
   }
 }

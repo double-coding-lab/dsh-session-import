@@ -87,10 +87,6 @@ export interface ParseStats {
 
 /** Import-time knobs chosen by the user or the profile config. */
 export interface ImportOptions {
-  /** `window` = resumable window only; `full` = replay everything. */
-  fidelity: 'window' | 'full'
-  /** Keep at most this many recent turns in `window` mode. 0 = unlimited. */
-  maxTurns: number
   /** Hard cap per single text block; head and tail survive around a marker. */
   perTextLimit: number
   /** Keep plaintext reasoning blocks. */
@@ -98,8 +94,6 @@ export interface ImportOptions {
 }
 
 export const DEFAULT_IMPORT_OPTIONS: ImportOptions = {
-  fidelity: 'window',
-  maxTurns: 80,
   perTextLimit: 262_144,
   keepReasoning: false,
 }

@@ -179,7 +179,6 @@ export async function runImport(
 ): Promise<ImportResult> {
   const parsed = await parseClaudeJsonl(request.sourcePath, {
     providerId: request.providerId,
-    includeFullHistory: request.options.fidelity === 'full',
   })
   const state = new ImportStateStore(join(dshHome(), 'session-import', 'state.json'))
   return importSession({ persistence, state }, parsed, request.options)

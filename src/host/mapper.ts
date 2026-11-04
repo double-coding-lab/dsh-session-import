@@ -47,20 +47,6 @@ function truncate(text: string, limit: number, counter: { value: number }): stri
   return text.slice(0, keep) + TRUNCATION_MARKER + text.slice(text.length - keep)
 }
 
-/** Select the trailing N turns (a turn starts at each user message). */
-function windowEvents(events: SourceEvent[], options: ImportOptions): SourceEvent[] {
-  if (options.fidelity === 'full' || options.maxTurns <= 0) return events
-  let seen = 0
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event?.kind === 'user') {
-      seen += 1
-      if (seen === options.maxTurns) return events.slice(index)
-    }
-  }
-  return events
-}
-
 export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): MapResult {
   const events: DshEvent[] = []
   const truncated = { value: 0 }
@@ -138,7 +124,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
     stepOpen = true
   }
 
-  const windowed = windowEvents(source, options)
+  const windowed = source
 
   for (let index = 0; index < windowed.length; index += 1) {
     const event = windowed[index]!
