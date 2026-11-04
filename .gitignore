@@ -5,3 +5,6 @@ dist/
 Thumbs.db
 .tmp/
 coverage/
+
+# 任务清单随代码走，但不入公开仓
+.task/

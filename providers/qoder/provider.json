@@ -1,0 +1,19 @@
+{
+  "$schema": "../../schema/provider.schema.json",
+  "schemaVersion": 1,
+  "id": "qoder",
+  "name": "Qoder",
+  "family": "claude-jsonl",
+  "roots": {
+    "win32": ["~/.qoder/projects"],
+    "darwin": ["~/.qoder/projects"],
+    "linux": ["~/.qoder/projects"]
+  },
+  "layout": {
+    "sessionGlob": "*/*.jsonl",
+    "subagentGlob": "*/subagents/*.jsonl"
+  },
+  "cwd": { "from": "workspace-directories.directories[0]" },
+  "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true },
+  "capabilities": { "resume": true, "images": true, "subagents": true, "reasoning": true }
+}

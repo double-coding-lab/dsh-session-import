@@ -1,0 +1,12 @@
+# dsh-session-import bundle patch: inserts the plugin row into the web profile
+# roster. Activate with:
+#   dsh plugin --profile web add link:<path-to-this-package>
+- insert:
+    - id: dsh-session-import
+      name: "@double-coding/dsh-session-import"
+      config:
+        showSidebarEntry: true
+        fidelity: window
+        maxTurns: 80
+        perTextLimit: 262144
+        keepReasoning: false

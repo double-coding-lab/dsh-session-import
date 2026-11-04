@@ -1,0 +1,65 @@
+{
+  "name": "@double-coding/dsh-session-import",
+  "version": "0.0.1",
+  "description": "DeepSeek Harness plugin: import third-party agent sessions (Qoder, Claude Code, Codex, WorkBuddy…) as resumable DSH sessions, with a data-only provider model.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "session-import",
+    "qoder",
+    "claude-code",
+    "codex"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/double-coding-lab/dsh-session-import.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "default": "./dist/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "providers",
+    "schema",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "analyze": "node scripts/analyze.ts",
+    "check": "npm run typecheck && node scripts/check-providers.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-session": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "~5.7.2"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}
