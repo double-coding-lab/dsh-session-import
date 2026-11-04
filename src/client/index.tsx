@@ -1,15 +1,16 @@
 /**
- * Client panel: pick a source app, tick the sessions you want, import them.
+ * Settings section: import third-party sessions into DSH.
  *
- * Two levels only (app row → session list), matching the Qoder pattern, with a
- * confirm step before anything is written. Every colour is a DSH design token.
+ * Registered into `settings.section` (next to 通用设置 / 模型 …) rather than the
+ * sidebar, and laid out like a native settings page: rows with a title and a
+ * secondary description on the left, the control on the right.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 export const inject: string[] = ['locale']
 
-const PANEL_ID = 'dsh-session-import'
+const SECTION_ID = 'session-import'
 const STYLE_ID = 'dsh-session-import-style'
 const API = '/dsh-session-import/api'
 const PROBE_ROUNDS = 6
@@ -62,7 +63,7 @@ async function getJson<T>(path: string): Promise<T> {
   return (await response.json()) as T
 }
 
-function Panel(): React.ReactElement {
+function Section(): React.ReactElement {
   const [providers, setProviders] = useState<ProviderSummary[]>([])
   const [sessions, setSessions] = useState<Record<string, ScannedSession[]>>({})
   const [expanded, setExpanded] = useState<string | undefined>()
@@ -151,117 +152,118 @@ function Panel(): React.ReactElement {
 
   return (
     <div className="dsi-root">
-      <header className="dsi-head">
-        <h1 className="dsi-title">从已安装的应用导入</h1>
-        <p className="dsi-sub">选择要带进 DSH 的会话，导入后可直接继续对话。</p>
-      </header>
+      <div className="dsi-row dsi-row-head">
+        <div className="dsi-text">
+          <div className="dsi-label">从已安装的应用导入</div>
+          <div className="dsi-desc">选择要带进 DSH 的会话，导入后可以直接继续对话。</div>
+        </div>
+      </div>
 
       {providers.map(provider => {
         const list = sessions[provider.id]
         const chosen = selected[provider.id] ?? new Set<string>()
         const open = expanded === provider.id
         return (
-          <section className="dsi-card" key={provider.id}>
-            <button className="dsi-row" type="button" onClick={() => setExpanded(open ? undefined : provider.id)}>
-              <span className={`dsi-caret${open ? ' dsi-caret-open' : ''}`} aria-hidden>▸</span>
-              <span className="dsi-app">{provider.name}</span>
-              <span className="dsi-count">
-                {list === undefined ? '扫描中…' : `${list.length} 个会话`}
-                {chosen.size > 0 ? ` · 已选 ${chosen.size}` : ''}
-              </span>
-            </button>
+          <div className="dsi-group" key={provider.id}>
+            <div className="dsi-row">
+              <button className="dsi-app" type="button" onClick={() => setExpanded(open ? undefined : provider.id)}>
+                <span className={`dsi-caret${open ? ' dsi-caret-open' : ''}`} aria-hidden>▸</span>
+                <span className="dsi-label">{provider.name}</span>
+              </button>
+              <div className="dsi-right">
+                <span className="dsi-desc">
+                  {list === undefined ? '扫描中…' : `${list.length} 个会话`}
+                  {chosen.size > 0 ? ` · 已选 ${chosen.size}` : ''}
+                </span>
+                {list !== undefined && list.length > 0 && (
+                  <label className="dsi-check dsi-inline">
+                    <input
+                      type="checkbox"
+                      checked={chosen.size === list.length}
+                      onChange={() => selectAll(provider.id)}
+                    />
+                    <span>全选</span>
+                  </label>
+                )}
+              </div>
+            </div>
 
             {open && list !== undefined && (
-              <div className="dsi-body">
-                <label className="dsi-check dsi-all">
-                  <input
-                    type="checkbox"
-                    checked={chosen.size === list.length && list.length > 0}
-                    onChange={() => selectAll(provider.id)}
-                  />
-                  <span>全选</span>
-                </label>
-                <ul className="dsi-list">
-                  {list.map(item => (
-                    <li key={item.sourceSessionId} className="dsi-item">
-                      <label className="dsi-check">
-                        <input
-                          type="checkbox"
-                          checked={chosen.has(item.sourceSessionId)}
-                          onChange={() => toggle(provider.id, item.sourceSessionId)}
-                        />
-                        <span className="dsi-id">{item.sourceSessionId.slice(0, 8)}</span>
-                        <span className="dsi-meta">{mb(item.bytes)} · {tokens(item.bytes)} · {day(item.mtimeMs)}</span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              <ul className="dsi-list">
+                {list.map(item => (
+                  <li key={item.sourceSessionId}>
+                    <label className="dsi-check dsi-item">
+                      <input
+                        type="checkbox"
+                        checked={chosen.has(item.sourceSessionId)}
+                        onChange={() => toggle(provider.id, item.sourceSessionId)}
+                      />
+                      <span className="dsi-id">{item.sourceSessionId.slice(0, 8)}</span>
+                      <span className="dsi-desc">{mb(item.bytes)} · {tokens(item.bytes)} · {day(item.mtimeMs)}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
             )}
-          </section>
+          </div>
         )
       })}
 
-      {error !== '' && <p className="dsi-error">{error}</p>}
-
-      <footer className="dsi-foot">
-        <span className="dsi-status">{status === '' ? `已选 ${totalSelected} 项` : status}</span>
+      <div className="dsi-row">
+        <div className="dsi-text">
+          <div className="dsi-label">保真度</div>
+          <div className="dsi-desc">可续聊窗口只带最近一段对话，完整历史包含全部内容。</div>
+        </div>
         <select
           className="dsi-select"
           value={fidelity}
           onChange={event => setFidelity(event.target.value === 'full' ? 'full' : 'window')}
         >
-          <option value="window">可续聊窗口（推荐）</option>
+          <option value="window">可续聊窗口</option>
           <option value="full">完整历史</option>
         </select>
+      </div>
+
+      {error !== '' && <div className="dsi-row"><span className="dsi-error">{error}</span></div>}
+
+      <div className="dsi-row dsi-row-foot">
+        <span className="dsi-desc">{status === '' ? `已选 ${totalSelected} 项` : status}</span>
         <button className="dsi-primary" type="button" disabled={busy || totalSelected === 0} onClick={() => void runImport()}>
           {busy ? '导入中…' : '导入'}
         </button>
-      </footer>
+      </div>
     </div>
   )
 }
 
-function PanelIcon(): React.ReactElement {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <path d="M8 2v8m0 0 3-3m-3 3L5 7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M3 12.5h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-/** Single injected stylesheet; all colours come from DSH tokens. */
+/** Single injected stylesheet; colours and radii come from DSH tokens. */
 function installStyles(): void {
   if (document.getElementById(STYLE_ID) !== null) return
   const style = document.createElement('style')
   style.id = STYLE_ID
   style.textContent = `
-.dsi-root{display:flex;flex-direction:column;gap:12px;padding:16px;font-family:var(--dsw-font-family);font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);height:100%;box-sizing:border-box}
-.dsi-head{display:flex;flex-direction:column;gap:4px}
-.dsi-title{margin:0;font-size:20px;line-height:28px;font-weight:600}
-.dsi-sub{margin:0;color:var(--dsw-alias-label-secondary);font-size:14px}
-.dsi-card{border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-secondary);overflow:hidden}
-.dsi-row{display:flex;align-items:center;gap:8px;width:100%;padding:10px 12px;background:none;border:0;cursor:pointer;color:inherit;font:inherit;text-align:left}
-.dsi-row:hover{background:var(--dsw-alias-bg-tertiary)}
-.dsi-caret{display:inline-block;transition:transform .15s ease;color:var(--dsw-alias-label-tertiary)}
+.dsi-root{display:flex;flex-direction:column;font-family:var(--dsw-font-family);font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
+.dsi-row{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dsi-row-head{padding-top:0}
+.dsi-row-foot{border-bottom:0;padding-bottom:8px}
+.dsi-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dsi-label{font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
+.dsi-desc{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.dsi-right{margin-left:auto;display:flex;align-items:center;gap:12px}
+.dsi-app{display:flex;align-items:center;gap:8px;background:none;border:0;padding:0;cursor:pointer;color:inherit;font:inherit}
+.dsi-caret{display:inline-block;font-size:11px;color:var(--dsw-alias-label-tertiary);transition:transform .15s ease}
 .dsi-caret-open{transform:rotate(90deg)}
-.dsi-app{font-weight:600}
-.dsi-count{margin-left:auto;color:var(--dsw-alias-label-secondary);font-size:13px}
-.dsi-body{border-top:1px solid var(--dsw-alias-border-l2);padding:8px 12px 12px}
-.dsi-list{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:2px;max-height:320px;overflow:auto}
+.dsi-group{display:flex;flex-direction:column}
+.dsi-list{list-style:none;margin:0;padding:0 0 12px 20px;display:flex;flex-direction:column;gap:4px;max-height:280px;overflow:auto;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dsi-check{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;line-height:20px}
-.dsi-all{color:var(--dsw-alias-label-secondary)}
-.dsi-id{font-family:var(--dsw-font-family-mono,monospace)}
-.dsi-meta{color:var(--dsw-alias-label-tertiary);font-size:12px}
+.dsi-inline{margin-left:4px}
 .dsi-item{padding:2px 0}
-.dsi-foot{display:flex;align-items:center;gap:8px;margin-top:auto;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2)}
-.dsi-status{color:var(--dsw-alias-label-secondary);font-size:13px;margin-right:auto}
+.dsi-id{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .dsi-select{height:32px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-secondary);color:inherit;font:inherit;font-size:13px}
 .dsi-primary{height:32px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-button-primary-bg);color:var(--dsw-alias-button-primary-label);font:inherit;font-size:13px;cursor:pointer}
 .dsi-primary:disabled{opacity:.5;cursor:not-allowed}
 .dsi-primary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
-.dsi-error{margin:0;color:var(--dsw-alias-state-error-primary);font-size:13px}
+.dsi-error{color:var(--dsw-alias-state-error-primary);font-size:13px}
 `
   document.head.appendChild(style)
 }
@@ -280,12 +282,19 @@ export function apply(ctx: Context): () => void {
       return
     }
     try {
-      slots.inject('main', () => slots.register({ name: 'main', key: PANEL_ID }, () => <Panel />))
-      slots.inject('sidebar.panellist', () =>
-        slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 30, label: () => '会话导入' }, PanelIcon))
-      console.info('[dsh-session-import] panel registered')
+      slots.inject('settings.section', () =>
+        slots.register(
+          {
+            name: 'settings.section',
+            id: SECTION_ID,
+            order: 30,
+            label: () => '会话导入',
+          },
+          Section,
+        ))
+      console.info('[dsh-session-import] settings section registered')
     } catch (cause) {
-      console.error('[dsh-session-import] panel registration failed', cause)
+      console.error('[dsh-session-import] settings section registration failed', cause)
     }
   }
 
