@@ -297,6 +297,7 @@ function Section(): React.ReactElement {
                 )}
               </div>
             </div>
+            <div className="dsi-group-sub">{list === undefined ? '正在读取目录…' : '按最近修改时间排序'}</div>
 
             {open && list !== undefined && (
               <ul className="dsi-list">
@@ -331,7 +332,6 @@ function Section(): React.ReactElement {
               </ul>
             )}
 
-            {open && <div className="dsi-group-sub">{list === undefined ? '正在读取目录…' : '按最近修改时间排序'}</div>}
           </div>
         )
       })}
@@ -412,7 +412,7 @@ function installStyles(): void {
 .dsi-toggle:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 .dsi-group-title{font-size:14px;line-height:22px;font-weight:400;color:var(--dsw-alias-label-primary)}
 .dsi-head-end{margin-left:auto;display:flex;align-items:center;gap:12px}
-.dsi-group-sub{margin:-6px 0 0 24px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.dsi-group-sub{margin:-6px 0 0 20px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 
 .dsi-chevron{flex:none;color:var(--dsw-alias-label-tertiary);transform:rotate(-90deg)}
 .dsi-chevron-open{transform:none}
