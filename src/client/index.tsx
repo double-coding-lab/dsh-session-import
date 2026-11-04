@@ -301,12 +301,12 @@ function installStyles(): void {
   style.id = STYLE_ID
   style.textContent = `
 .dsi-root{display:flex;flex-direction:column;font-family:var(--dsw-font-family);font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
-.dsi-row{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dsi-row{display:flex;align-items:center;gap:8px;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
 .dsi-row-head{padding-top:0}
 .dsi-row-foot{border-bottom:0;padding-bottom:8px}
-.dsi-text{display:flex;flex-direction:column;gap:2px;min-width:0}
-.dsi-label{font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
-.dsi-desc{font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.dsi-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;padding-right:48px}
+.dsi-label{font-size:14px;font-weight:400;line-height:22px;color:var(--dsw-alias-label-primary)}
+.dsi-desc{font-size:12px;font-weight:400;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .dsi-right{margin-left:auto;display:flex;align-items:center;gap:12px}
 .dsi-app{display:flex;align-items:center;gap:8px;background:none;border:0;padding:0;cursor:pointer;color:inherit;font:inherit}
 .dsi-caret{display:inline-block;font-size:11px;color:var(--dsw-alias-label-tertiary);transition:transform .15s ease}
@@ -317,8 +317,8 @@ function installStyles(): void {
 .dsi-inline{margin-left:4px}
 .dsi-item{padding:2px 0}
 .dsi-id{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
-.dsi-select{height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover);color:inherit;font:inherit;font-size:13px}
-.dsi-primary{height:32px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-button-primary-bg);color:var(--dsw-alias-button-primary-label);font:inherit;font-size:13px;cursor:pointer}
+.dsi-select{height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;cursor:pointer}
+.dsi-primary{height:36px;padding:0 16px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-button-primary-bg);color:var(--dsw-alias-button-primary-label);font:inherit;font-size:14px;cursor:pointer}
 .dsi-primary:disabled{opacity:.5;cursor:not-allowed}
 .dsi-primary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
 .dsi-error{color:var(--dsw-alias-state-error-primary);font-size:13px}
@@ -333,7 +333,7 @@ function installStyles(): void {
 .dsi-dialog h2{margin:0;font-size:16px;line-height:24px;font-weight:600}
 .dsi-dialog p{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
 .dsi-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
-.dsi-ghost{height:32px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
+.dsi-ghost{height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;cursor:pointer}
 `
   document.head.appendChild(style)
 }
