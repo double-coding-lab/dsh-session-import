@@ -51,7 +51,7 @@
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc --noEmit",
     "analyze": "node scripts/analyze.ts",
-    "check": "npm run typecheck && node scripts/check-providers.mjs"
+    "check": "node scripts/check.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",

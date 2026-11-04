@@ -1,0 +1,10 @@
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:00.000Z","workspace-directories":{"directories":["E:\\demo\\project"]},"message":{"role":"user","content":[{"type":"text","text":"帮我看看这个文件"}]}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"我先读一下。"},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"E:\\demo\\project\\a.ts"}}]}}
+{"type":"user","uuid":"tr1","parentUuid":"a1","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"export const a = 1"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"tr1","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"这是常量定义。"},{"type":"tool_use","id":"call-orphan","name":"Grep","input":{"pattern":"TODO"}}]}}
+{"type":"user","uuid":"u2","parentUuid":"a2","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:04.000Z","message":{"role":"user","content":[{"type":"text","text":"继续"}]}}
+{"type":"assistant","uuid":"a3","parentUuid":"u2","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"好的。"}]}}
+{"type":"system","subtype":"compact_boundary","uuid":"c1","parentUuid":"a3","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:06.000Z"}
+{"type":"user","uuid":"u3","parentUuid":"c1","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:07.000Z","message":{"role":"user","content":[{"type":"text","text":"压缩之后继续"}]}}
+{"type":"assistant","uuid":"a4","parentUuid":"u3","sessionId":"fixture-sample","timestamp":"2026-11-01T00:00:08.000Z","message":{"role":"assistant","content":[{"type":"text","text":"收到。"}]}}
+{"type":"active-leaf","sessionId":"fixture-sample","leafUuid":"a4","explicit":true,"timestamp":"2026-11-01T00:00:09.000Z"}
