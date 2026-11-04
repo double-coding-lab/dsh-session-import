@@ -79,6 +79,7 @@ function Section(): React.ReactElement {
   const [selected, setSelected] = useState<Record<string, Set<string>>>({})
   const [fidelity, setFidelity] = useState<'window' | 'full'>('window')
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const [status, setStatus] = useState<string>('')
   const [error, setError] = useState<string>('')
 
@@ -267,10 +268,28 @@ function Section(): React.ReactElement {
 
       <div className="dsi-row dsi-row-foot">
         <span className="dsi-desc">{status === '' ? `已选 ${totalSelected} 项` : status}</span>
-        <button className="dsi-primary" type="button" disabled={busy || totalSelected === 0} onClick={() => void runImport()}>
+        <button className="dsi-primary" type="button" disabled={busy || totalSelected === 0} onClick={() => setConfirming(true)}>
           {busy ? '导入中…' : '导入'}
         </button>
       </div>
+
+      {confirming && (
+        <div className="dsi-mask" role="presentation" onClick={() => { if (!busy) setConfirming(false) }}>
+          <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label="确认导入" onClick={event => event.stopPropagation()}>
+            <h2>确认导入</h2>
+            <p>
+              将导入 {totalSelected} 个会话，保真度「{fidelity === 'window' ? '可续聊窗口' : '完整历史'}」。
+              导入后会出现在左侧会话列表，可直接继续对话。
+            </p>
+            <div className="dsi-dialog-actions">
+              <button className="dsi-ghost" type="button" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
+              <button className="dsi-primary" type="button" disabled={busy} onClick={() => { setConfirming(false); void runImport() }}>
+                {busy ? '导入中…' : `导入 ${totalSelected} 个会话`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -282,7 +301,7 @@ function installStyles(): void {
   style.id = STYLE_ID
   style.textContent = `
 .dsi-root{display:flex;flex-direction:column;font-family:var(--dsw-font-family);font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary)}
-.dsi-row{display:flex;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dsi-row{display:flex;align-items:center;gap:16px;padding:14px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
 .dsi-row-head{padding-top:0}
 .dsi-row-foot{border-bottom:0;padding-bottom:8px}
 .dsi-text{display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -298,7 +317,7 @@ function installStyles(): void {
 .dsi-inline{margin-left:4px}
 .dsi-item{padding:2px 0}
 .dsi-id{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
-.dsi-select{height:32px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-secondary);color:inherit;font:inherit;font-size:13px}
+.dsi-select{height:32px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-tertiary);color:inherit;font:inherit;font-size:13px}
 .dsi-primary{height:32px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-button-primary-bg);color:var(--dsw-alias-button-primary-label);font:inherit;font-size:13px;cursor:pointer}
 .dsi-primary:disabled{opacity:.5;cursor:not-allowed}
 .dsi-primary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
@@ -309,6 +328,12 @@ function installStyles(): void {
 .dsi-badge-failed{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
 .dsi-link{margin-left:auto;background:none;border:0;padding:0;color:var(--dsw-alias-state-business-primary);font:inherit;font-size:12px;cursor:pointer}
 .dsi-link:hover{text-decoration:underline}
+.dsi-mask{position:fixed;inset:0;background:rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;z-index:50}
+.dsi-dialog{width:min(420px,90vw);background:var(--dsw-alias-bg-primary);border-radius:var(--dsw-radius-lg);padding:20px;display:flex;flex-direction:column;gap:12px;font-family:var(--dsw-font-family);color:var(--dsw-alias-label-primary);box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.dsi-dialog h2{margin:0;font-size:16px;line-height:24px;font-weight:600}
+.dsi-dialog p{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.dsi-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+.dsi-ghost{height:32px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:none;color:inherit;font:inherit;font-size:13px;cursor:pointer}
 `
   document.head.appendChild(style)
 }
