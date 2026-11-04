@@ -4,14 +4,20 @@
   "id": "claude-code",
   "name": "Claude Code",
   "family": "claude-jsonl",
-  "roots": {
-    "win32": ["~/.claude/projects"],
-    "darwin": ["~/.claude/projects"],
-    "linux": ["~/.claude/projects"]
+  "assets": {
+    "sessions": {
+      "roots": {
+        "win32": ["~/.claude/projects"],
+        "darwin": ["~/.claude/projects"],
+        "linux": ["~/.claude/projects"]
+      },
+      "layout": { "sessionGlob": "*/*.jsonl" },
+      "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true }
+    },
+    "memory": {
+      "projectRoots": ["~/.claude/projects/<项目>/memory"],
+      "format": "markdown-frontmatter"
+    }
   },
-  "layout": {
-    "sessionGlob": "*/*.jsonl"
-  },
-  "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true },
   "capabilities": { "resume": true, "images": true, "subagents": false, "reasoning": true }
 }

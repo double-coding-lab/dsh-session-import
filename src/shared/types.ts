@@ -24,22 +24,54 @@ export interface ProviderLayout {
   subagentGlob?: string
 }
 
+/** Conversation asset: where transcripts live and how to read their metadata. */
+export interface SessionAsset {
+  roots: ProviderRoots
+  layout: ProviderLayout
+  cwd?: { from?: string }
+  title?: { fields?: string[]; fromFirstUserMessage?: boolean }
+}
+
+/**
+ * Memory asset. Memory is a file-write product, not an event log: Qoder and
+ * Claude Code both store Markdown with YAML frontmatter (`metadata.type` is
+ * `feedback` | `reference` | `user`).
+ */
+export interface MemoryAsset {
+  globalRoots?: string[]
+  /** Supports the `<项目>` placeholder, resolved from the session cwd. */
+  projectRoots?: string[]
+  format: 'markdown-frontmatter'
+}
+
 /** One built-in provider entry (`providers/<id>/provider.json`). Pure data. */
 export interface ProviderDescriptor {
   schemaVersion: 1
   id: string
   name: string
   family: SourceFamily
-  roots: ProviderRoots
-  layout: ProviderLayout
-  cwd?: { from?: string }
-  title?: { fields?: string[]; fromFirstUserMessage?: boolean }
+  assets: {
+    sessions?: SessionAsset
+    memory?: MemoryAsset
+  }
   capabilities?: {
     resume?: boolean
     images?: boolean
     subagents?: boolean
     reasoning?: boolean
   }
+}
+
+/** One memory file discovered under a provider's memory roots. */
+export interface MemoryEntry {
+  providerId: string
+  /** `name` from the frontmatter, falling back to the file basename. */
+  name: string
+  description?: string
+  type?: string
+  sourcePath: string
+  bytes: number
+  mtimeMs: number
 }
 
 /** A normalized conversation event, independent of any tool's format. */
