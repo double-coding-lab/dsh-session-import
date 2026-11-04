@@ -94,6 +94,9 @@ const INJECTED_PREFIXES = [
   '# ',
 ]
 
+/** Skill bodies arrive as user messages; they are tool context, not human input. */
+const SKILL_INJECTION_PREFIXES = ['Base directory for this skill']
+
 /**
  * Pick a human-meaningful title. The first user records in a transcript are
  * usually injected context (skill listings, continuations, reminders), so we
@@ -122,9 +125,12 @@ export async function parseClaudeJsonl(
     mainlineRecords: 0,
     sidechainRecords: 0,
     compactBoundaries: 0,
+    injectedUserMessages: 0,
     ignoredTypes: {},
     blocks: {},
   }
+
+  let injectedUserMessages = 0
 
   const records: RawRecord[] = []
   const byUuid = new Map<string, RawRecord>()
@@ -237,8 +243,17 @@ export async function parseClaudeJsonl(
         }
       }
       if (texts.length > 0) {
-        push({ kind: 'turn-boundary', time })
-        push({ kind: 'user', time, text: texts.join('\n\n') })
+        const joined = texts.join('\n\n')
+        // The source tool injects skill bodies as user messages. Keeping them
+        // imports whole skill documents as if the human had typed them, which
+        // both bloats the window and fabricates turns. The continuation
+        // summary is different: it IS the head context of the window.
+        if (SKILL_INJECTION_PREFIXES.some(prefix => joined.startsWith(prefix))) {
+          injectedUserMessages += 1
+        } else {
+          push({ kind: 'turn-boundary', time })
+          push({ kind: 'user', time, text: joined })
+        }
       }
     } else if (record.type === 'assistant') {
       const blocks = Array.isArray(content) ? content : [{ type: 'text', text: blockText(content) }]
@@ -272,6 +287,8 @@ export async function parseClaudeJsonl(
   if (title === undefined) {
     title = pickTitle(events)
   }
+
+  stats.injectedUserMessages = injectedUserMessages
 
   return {
     sourceSessionId: sessionId ?? basename(sourcePath, '.jsonl'),

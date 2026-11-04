@@ -79,6 +79,8 @@ export interface ParseStats {
   mainlineRecords: number
   sidechainRecords: number
   compactBoundaries: number
+  /** Skill bodies the source tool injected as user messages; dropped. */
+  injectedUserMessages: number
   ignoredTypes: Record<string, number>
   blocks: Record<string, number>
 }

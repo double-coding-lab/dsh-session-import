@@ -159,6 +159,9 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         break
       }
       case 'assistant': {
+        // One step == one model call: a new assistant message closes the
+        // previous step (flushing any call that never got a result).
+        closeStep(event.time)
         ensureStep(event.time)
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
@@ -183,6 +186,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           droppedReasoning += 1
           break
         }
+        closeStep(event.time)
         ensureStep(event.time)
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
