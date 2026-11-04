@@ -12,7 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { importSession, type PersistencePort } from '../src/host/importer.ts'
+import { importSession, type PersistencePort, type SessionHandle } from '../src/host/importer.ts'
 import { parseClaudeJsonl } from '../src/host/parsers/claude-jsonl.ts'
 import { ImportStateStore } from '../src/host/state.ts'
 import { DEFAULT_IMPORT_OPTIONS } from '../src/shared/types.ts'
@@ -29,6 +29,30 @@ interface StoredSession {
   events: DshEvent[]
 }
 
+class FakeHandle implements SessionHandle {
+  readonly #session: StoredSession
+
+  constructor(session: StoredSession) {
+    this.#session = session
+  }
+
+  async append(events: readonly DshEvent[]): Promise<void> {
+    events.forEach((event, index) => {
+      const expected = this.#session.events.length + index
+      if (event.seq !== expected) throw new Error(`append: seq 不连续，期望 ${expected}，收到 ${event.seq}`)
+    })
+    this.#session.events.push(...events)
+  }
+
+  async flush(): Promise<void> {}
+
+  async close(): Promise<void> {}
+
+  async read(): Promise<{ events: readonly { type: string; seq: number }[] }> {
+    return { events: this.#session.events.map(event => ({ type: event.type, seq: event.seq })) }
+  }
+}
+
 class FakePersistence implements PersistencePort {
   readonly sessions = new Map<string, StoredSession>()
 
@@ -39,27 +63,22 @@ class FakePersistence implements PersistencePort {
     cwd?: string
     isSeeded: boolean
     delegationDepth: number
-  }): Promise<void> {
+  }): Promise<SessionHandle> {
     if (this.sessions.has(header.id)) throw new Error(`create: 会话已存在 ${header.id}`)
     if (header.version !== 4) throw new Error(`create: 版本必须是 4，收到 ${header.version}`)
     if (header.isSeeded !== false) throw new Error('create: 导入会话的 isSeeded 必须是 false')
-    this.sessions.set(header.id, { header: { id: header.id, ...(header.cwd === undefined ? {} : { cwd: header.cwd }) }, events: [] })
+    const session: StoredSession = {
+      header: { id: header.id, ...(header.cwd === undefined ? {} : { cwd: header.cwd }) },
+      events: [],
+    }
+    this.sessions.set(header.id, session)
+    return new FakeHandle(session)
   }
 
-  async append(id: string, events: readonly DshEvent[]): Promise<void> {
+  async open(id: string): Promise<SessionHandle> {
     const session = this.sessions.get(id)
-    if (session === undefined) throw new Error(`append: 会话不存在 ${id}`)
-    events.forEach((event, index) => {
-      const expected = session.events.length + index
-      if (event.seq !== expected) throw new Error(`append: seq 不连续，期望 ${expected}，收到 ${event.seq}`)
-    })
-    session.events.push(...events)
-  }
-
-  async inspect(id: string): Promise<{ events: readonly { type: string; seq: number }[] }> {
-    const session = this.sessions.get(id)
-    if (session === undefined) throw new Error(`inspect: 会话不存在 ${id}`)
-    return { events: session.events.map(event => ({ type: event.type, seq: event.seq })) }
+    if (session === undefined) throw new Error(`open: 会话不存在 ${id}`)
+    return new FakeHandle(session)
   }
 }
 
