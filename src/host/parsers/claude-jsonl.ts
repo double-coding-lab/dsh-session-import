@@ -83,6 +83,34 @@ function mainlineOf(byUuid: Map<string, RawRecord>, leafUuid: string | undefined
   return chain.reverse()
 }
 
+/** Openers of synthetic context the source tool injected as a user message. */
+const INJECTED_PREFIXES = [
+  'This session is being continued',
+  'Base directory for this skill',
+  'Caveat:',
+  'You are a',
+  '<',
+  '---',
+  '# ',
+]
+
+/**
+ * Pick a human-meaningful title. The first user records in a transcript are
+ * usually injected context (skill listings, continuations, reminders), so we
+ * skip those rather than showing a filesystem path as the session name.
+ */
+function pickTitle(events: SourceEvent[]): string | undefined {
+  for (const event of events) {
+    if (event.kind !== 'user') continue
+    const text = event.text.trim()
+    if (text.length < 2) continue
+    if (INJECTED_PREFIXES.some(prefix => text.startsWith(prefix))) continue
+    const title = text.replace(/\s+/g, ' ').slice(0, 80)
+    if (title !== '') return title
+  }
+  return undefined
+}
+
 export async function parseClaudeJsonl(
   sourcePath: string,
   options: ParseOptions,
@@ -242,10 +270,7 @@ export async function parseClaudeJsonl(
   }
 
   if (title === undefined) {
-    const firstUser = events.find(event => event.kind === 'user')
-    if (firstUser && firstUser.kind === 'user') {
-      title = firstUser.text.replace(/\s+/g, ' ').slice(0, 80)
-    }
+    title = pickTitle(events)
   }
 
   return {
