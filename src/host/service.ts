@@ -2,7 +2,7 @@
  * Host-side service layer: provider discovery, session scanning, and the real
  * import run against DSH's own persistence.
  */
-import { readdir, readFile, rm, stat } from 'node:fs/promises'
+import { open, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { zstdDecompressSync } from 'node:zlib'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -26,6 +26,8 @@ export function rootsFor(provider: ProviderDescriptor): string[] {
 }
 
 export interface ScannedSession {
+  /** Human-readable title hint from the source transcript. */
+  title?: string
   providerId: string
   sourcePath: string
   sourceSessionId: string
@@ -88,6 +90,7 @@ export async function scanProvider(
             bytes: info.size,
             mtimeMs: info.mtimeMs,
             status,
+            ...(await readTitleHint(file).then(title => (title === undefined ? {} : { title }))),
             ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
           })
         } catch {
@@ -98,6 +101,53 @@ export async function scanProvider(
   }
 
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs)
+}
+
+/**
+ * Cheap title hint for the picker: the source tool's own title when present,
+ * otherwise the first human message. Only the head of the file is read, so a
+ * 60 MB transcript does not slow the list down.
+ */
+export async function readTitleHint(file: string): Promise<string | undefined> {
+  const HEAD_BYTES = 512 * 1024
+  let text = ''
+  try {
+    const handle = await open(file, 'r')
+    try {
+      const buffer = Buffer.alloc(HEAD_BYTES)
+      const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
+      text = buffer.subarray(0, bytesRead).toString('utf8')
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    return undefined
+  }
+
+  let fallback: string | undefined
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue
+    let record: Record<string, unknown>
+    try {
+      record = JSON.parse(line) as Record<string, unknown>
+    } catch {
+      continue
+    }
+    for (const field of ['aiTitle', 'customTitle', 'title']) {
+      const value = record[field]
+      if (typeof value === 'string' && value.trim() !== '') return value.trim().slice(0, 80)
+    }
+    if (fallback === undefined && record['type'] === 'user') {
+      const message = record['message'] as { content?: unknown } | undefined
+      const content = message?.content
+      if (typeof content === 'string') fallback = content
+      else if (Array.isArray(content)) {
+        const first = content.find(block => (block as { type?: string })?.type === 'text') as { text?: string } | undefined
+        if (typeof first?.text === 'string') fallback = first.text
+      }
+    }
+  }
+  return fallback?.replace(/\s+/g, ' ').trim().slice(0, 80) || undefined
 }
 
 /** Read the idempotency ledger (missing/corrupt file reads as empty). */

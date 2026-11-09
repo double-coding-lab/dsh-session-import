@@ -29,6 +29,7 @@ interface ProviderSummary {
 }
 
 interface ScannedSession {
+  title?: string
   sourceSessionId: string
   sourcePath: string
   bytes: number
@@ -237,17 +238,17 @@ function Section(): React.ReactElement {
                 {list !== undefined && list.length > 0 && (
                   <label className="dsi-check">
                     <input
-                      className="dsi-box"
+                      className="dsi-box-input"
                       type="checkbox"
                       checked={chosen.size === list.length}
                       onChange={() => selectAll(provider.id)}
                     />
+                    <span className="dsi-box" aria-hidden>{chosen.size === list.length && <Check />}</span>
                     <span>全选</span>
                   </label>
                 )}
               </div>
             </div>
-            <div className="dsi-group-sub">{list === undefined ? '正在读取目录…' : '按最近修改时间排序'}</div>
 
             {open && list !== undefined && (
               <ul className="dsi-list">
@@ -255,12 +256,16 @@ function Section(): React.ReactElement {
                   <li key={item.sourceSessionId}>
                     <label className="dsi-check dsi-item">
                       <input
-                        className="dsi-box"
+                        className="dsi-box-input"
                         type="checkbox"
                         checked={chosen.has(item.sourceSessionId)}
                         onChange={() => toggle(provider.id, item.sourceSessionId)}
                       />
-                      <span className="dsi-item-id">{item.sourceSessionId.slice(0, 8)}</span>
+                      <span className="dsi-box" aria-hidden>{(chosen.has(item.sourceSessionId)) && <Check />}</span>
+                      <span className="dsi-item-main">
+                        <span className="dsi-item-title">{item.title ?? item.sourceSessionId.slice(0, 8)}</span>
+                        <span className="dsi-item-id">{item.sourceSessionId.slice(0, 8)}</span>
+                      </span>
                       <span className={`dsi-badge dsi-badge-${item.status}`}>{BADGE[item.status]}</span>
                       <span className="dsi-item-meta">{mb(item.bytes)} · {tokens(item.bytes)} · {day(item.mtimeMs)}</span>
                       {item.status !== 'new' && (
@@ -354,14 +359,16 @@ function installStyles(): void {
 
 .dsi-list{list-style:none;margin:0;padding:0 0 0 24px;display:flex;flex-direction:column;gap:2px;max-height:300px;overflow:auto}
 .dsi-item{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px;line-height:20px;cursor:pointer}
-.dsi-item-id{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
+.dsi-item-main{display:flex;flex-direction:column;min-width:0;gap:1px}
+.dsi-item-title{color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}
+.dsi-item-id{font-size:11px;line-height:16px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary)}
 .dsi-item-meta{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
 
-.dsi-check{display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
-.dsi-box{appearance:none;-webkit-appearance:none;flex:none;width:16px;height:16px;margin:0;border:0.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);background:var(--dsw-alias-bg-layer-1);cursor:pointer;position:relative}
-.dsi-box:checked{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
-.dsi-box:checked::after{content:'';position:absolute;left:4.5px;top:1.5px;width:4px;height:8px;border:solid var(--dsw-alias-button-primary-label);border-width:0 1.5px 1.5px 0;transform:rotate(45deg)}
-.dsi-box:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
+.dsi-check{position:relative;display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.dsi-box-input{position:absolute;left:0;top:50%;transform:translateY(-50%);width:16px;height:16px;margin:0;opacity:0;cursor:pointer}
+.dsi-box{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:1px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xs);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-button-primary-label);transition:background-color 120ms var(--ds-ease-in-out,ease-in-out),border-color 120ms var(--ds-ease-in-out,ease-in-out)}
+.dsi-box-input:checked + .dsi-box{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
+.dsi-box-input:focus-visible + .dsi-box{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 
 .dsi-badge{font-size:11px;line-height:18px;padding:0 6px;border-radius:var(--dsw-radius-xs);border:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary)}
 .dsi-badge-imported{color:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary)}
@@ -376,9 +383,9 @@ function installStyles(): void {
 .dsi-row-desc{font-size:12px;font-weight:400;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 
 
-.dsi-footer{display:flex;align-items:center;gap:12px;padding-top:14px}
+.dsi-footer{display:flex;align-items:center;justify-content:flex-end;gap:12px;padding-top:16px;border-top:0.5px solid var(--dsw-alias-border-l2)}
 .dsi-meta-inline{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
-.dsi-primary{height:36px;padding:0 16px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-button-primary-bg);color:var(--dsw-alias-button-primary-label);font:inherit;font-size:14px;cursor:pointer}
+.dsi-primary{height:36px;padding:0 16px;border:0;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-button-primary-bg,var(--dsw-alias-state-business-primary));color:var(--dsw-alias-button-primary-label,#fff);font:inherit;font-size:14px;font-weight:400;line-height:22px;cursor:pointer}
 .dsi-primary:disabled{opacity:.5;cursor:not-allowed}
 .dsi-primary:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}
 .dsi-ghost{height:36px;padding:0 14px;border:none;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;cursor:pointer}
