@@ -8,8 +8,9 @@
  * wrong place, so every import also attaches the new session to the workspace
  * whose `path` matches the session `cwd`.
  */
+import { randomUUID } from 'node:crypto'
 import { existsSync, promises as fs } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 
 interface WorkspaceRecord {
   path: string
@@ -30,6 +31,8 @@ interface WorkspaceStore {
 export interface AttachOutcome {
   attached: boolean
   workspacePath?: string
+  /** True when the workspace had to be created because no path matched. */
+  created?: boolean
   reason?: string
 }
 
@@ -72,11 +75,35 @@ export async function attachSessionToWorkspace(
   if (workspaces === undefined) return { attached: false, reason: '注册表结构不符' }
 
   const entry = Object.values(workspaces).find(record => samePath(record.path, cwd))
-  if (entry === undefined) return { attached: false, reason: `没有与 ${cwd} 对应的工作区` }
+  const now = new Date().toISOString()
+
+  if (entry === undefined) {
+    // No workspace for the source project yet: mirror it, so the imported
+    // session lands under the same name it had in the source tool. Duplicate
+    // titles are fine — workspaces are addressed by id, sessions by their
+    // `import-` prefixed id.
+    const id = randomUUID()
+    const title = basename(cwd) || cwd
+    workspaces[id] = {
+      path: cwd,
+      title,
+      sessionIds: [sessionId],
+      createdAt: now,
+      updatedAt: now,
+    }
+    const global = (store.global ?? {}) as Record<string, unknown>
+    const ids = Array.isArray(global['workspaceIds']) ? (global['workspaceIds'] as unknown[]) : []
+    if (!ids.includes(id)) ids.push(id)
+    global['workspaceIds'] = ids
+    store.global = global
+    await writeStore(file, store)
+    return { attached: true, workspacePath: cwd, created: true }
+  }
+
   if (entry.sessionIds.includes(sessionId)) return { attached: true, workspacePath: entry.path }
 
   entry.sessionIds.push(sessionId)
-  entry.updatedAt = new Date().toISOString()
+  entry.updatedAt = now
   await writeStore(file, store)
   return { attached: true, workspacePath: entry.path }
 }
