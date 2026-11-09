@@ -118,6 +118,8 @@ export interface ImportRecord {
 export type ImportStatus = 'imported' | 'skipped' | 'busy' | 'failed'
 
 export interface ImportResult {
+  /** Workspace the imported session was attached to, when registration succeeded. */
+  workspacePath?: string
   status: ImportStatus
   providerId: string
   sourceSessionId: string

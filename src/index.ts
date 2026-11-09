@@ -16,7 +16,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ImportOptions, ProviderDescriptor } from './shared/types.ts'
 import { DEFAULT_IMPORT_OPTIONS } from './shared/types.ts'
 import type { PersistencePort, SessionHandle } from './host/importer.ts'
-import { loadRecords, retractImport, runImport, scanProvider } from './host/service.ts'
+import { backfillWorkspaces, loadRecords, retractImport, runImport, scanProvider } from './host/service.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { version: string }
@@ -81,6 +81,13 @@ function importOptionsFrom(body: Record<string, unknown>): ImportOptions {
 }
 
 export function apply(ctx: Context): () => void {
+  void backfillWorkspaces()
+    .then(result => {
+      if (result.scanned === 0) return
+      console.info(`[dsh-session-import] 工作区自愈：扫描 ${result.scanned} 条，挂载 ${result.attached} 条`)
+    })
+    .catch(cause => console.warn('[dsh-session-import] 工作区自愈失败', cause))
+
   const loose = ctx as Context & { get?: (service: string) => unknown }
   const webServer = loose.get?.('webServer') as RouteFace | undefined
   const rawPersistence = loose.get?.('sessionPersistence') as

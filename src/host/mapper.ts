@@ -170,6 +170,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         push('assistant/message', event.time, {
           turn,
           step,
+          stream: [],
           message: {
             id: nextMessageId(),
             role: 'assistant',
@@ -195,6 +196,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         push('assistant/message', event.time, {
           turn,
           step,
+          stream: [],
           message: {
             id: nextMessageId(),
             role: 'assistant',
@@ -224,6 +226,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
           push('assistant/message', event.time, {
             turn,
             step,
+            stream: [],
             message: {
               id: nextMessageId(),
               role: 'assistant',

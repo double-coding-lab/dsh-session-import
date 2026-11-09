@@ -2,7 +2,8 @@
  * Host-side service layer: provider discovery, session scanning, and the real
  * import run against DSH's own persistence.
  */
-import { readdir, rm, stat } from 'node:fs/promises'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
+import { zstdDecompressSync } from 'node:zlib'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
@@ -10,6 +11,7 @@ import type { ImportOptions, ImportRecord, ImportResult, ProviderDescriptor } fr
 import { importSession, type PersistencePort } from './importer.ts'
 import { parseClaudeJsonl } from './parsers/claude-jsonl.ts'
 import { ImportStateStore, recordKey } from './state.ts'
+import { attachSessionToWorkspace, detachSessionFromWorkspaces } from './workspaces.ts'
 
 /** Expand a `~`-prefixed path against the current user's home. */
 export function expandHome(path: string): string {
@@ -148,12 +150,66 @@ export async function retractImport(providerId: string, sourceSessionId: string)
     }
   }
 
+  await detachSessionFromWorkspaces(dshHome(), record.dshSessionId)
   await store.remove(providerId, sourceSessionId)
   return {
     providerId,
     sourceSessionId,
     dshSessionId: record.dshSessionId,
     removedPaths,
+  }
+}
+
+/**
+ * Attach every previously imported session to its workspace.
+ *
+ * Older imports (and anything written by another tool) only produced the
+ * session log, so they sit in 「未分组」. Reading the stored header gives the
+ * cwd the workspace registry needs, and attaching is idempotent.
+ */
+export async function backfillWorkspaces(): Promise<{ attached: number; scanned: number }> {
+  const sessionsRoot = join(dshHome(), 'sessions')
+  let projectDirs: string[] = []
+  try {
+    projectDirs = (await readdir(sessionsRoot, { withFileTypes: true }))
+      .filter(entry => entry.isDirectory())
+      .map(entry => join(sessionsRoot, entry.name))
+  } catch {
+    return { attached: 0, scanned: 0 }
+  }
+
+  let attached = 0
+  let scanned = 0
+  for (const projectDir of projectDirs) {
+    let entries: { name: string; isDirectory(): boolean }[] = []
+    try {
+      entries = await readdir(projectDir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.startsWith('import-')) continue
+      scanned += 1
+      const cwd = await readSessionCwd(join(projectDir, entry.name))
+      if (cwd === undefined) continue
+      const outcome = await attachSessionToWorkspace(dshHome(), entry.name, cwd)
+      if (outcome.attached) attached += 1
+    }
+  }
+  return { attached, scanned }
+}
+
+/** Read the header record of a stored session to recover its cwd. */
+async function readSessionCwd(sessionDir: string): Promise<string | undefined> {
+  try {
+    const raw = await readFile(join(sessionDir, 'session.v4.jsonl.zstd'))
+    const text = zstdDecompressSync(raw).toString('utf8')
+    const first = text.split('\n').find(line => line.trim() !== '')
+    if (first === undefined) return undefined
+    const header = JSON.parse(first) as { cwd?: unknown }
+    return typeof header.cwd === 'string' ? header.cwd : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -181,5 +237,15 @@ export async function runImport(
     providerId: request.providerId,
   })
   const state = new ImportStateStore(join(dshHome(), 'session-import', 'state.json'))
-  return importSession({ persistence, state }, parsed, request.options)
+  const result = await importSession({ persistence, state }, parsed, request.options)
+
+  // A session file on disk is not enough: the sidebar groups by the workspace
+  // registry, so an unattached session would show up under 「未分组」.
+  if (result.status === 'imported' || result.status === 'appended') {
+    const cwd = (parsed as { cwd?: string }).cwd
+    const outcome = await attachSessionToWorkspace(dshHome(), result.dshSessionId, cwd)
+    console.info('[dsh-session-import] 工作区挂载: ' + (outcome.attached ? outcome.workspacePath : outcome.reason))
+    return outcome.attached ? { ...result, workspacePath: outcome.workspacePath } : result
+  }
+  return result
 }
