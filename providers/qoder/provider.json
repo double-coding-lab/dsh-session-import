@@ -3,6 +3,7 @@
   "schemaVersion": 1,
   "id": "qoder",
   "name": "Qoder",
+  "icon": "icon.png",
   "family": "claude-jsonl",
   "assets": {
     "sessions": {
@@ -18,6 +19,14 @@
       "cwd": { "from": "workspace-directories.directories[0]" },
       "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true }
     }
+  },
+  "fileLinks": {
+    "assistant": [
+      {
+        "syntax": "markdown-link",
+        "accept": ["file-url"]
+      }
+    ]
   },
   "capabilities": { "resume": true, "images": true, "subagents": true, "reasoning": true }
 }

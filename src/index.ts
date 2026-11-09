@@ -8,15 +8,24 @@
  */
 import { readFileSync, readdirSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { dirname, join } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { ImportOptions, ProviderDescriptor } from './shared/types.ts'
 import { DEFAULT_IMPORT_OPTIONS } from './shared/types.ts'
-import type { PersistencePort, SessionHandle } from './host/importer.ts'
-import { backfillWorkspaces, loadRecords, retractImport, runImport, scanProvider } from './host/service.ts'
+import type { PersistencePort, ProjectionCachePort, SessionHandle, SessionHeaderLike } from './host/importer.ts'
+import type { RetractRuntime, WorkspacePort } from './host/service.ts'
+import {
+  backfillTitles,
+  dshHome,
+  loadLiveRecords,
+  retractImport,
+  runImport,
+  scanProvider,
+} from './host/service.ts'
+import { attachSessionToWorkspace, detachSessionFromWorkspaces } from './host/workspaces.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')) as { version: string }
@@ -29,15 +38,21 @@ export const inject = ['webServer']
 export const ROUTE_PREFIX = '/dsh-session-import'
 
 /** Load every `providers/<id>/provider.json` shipped with the package. */
-function loadProviders(): ProviderDescriptor[] {
+interface LoadedProvider {
+  descriptor: ProviderDescriptor
+  dir: string
+}
+
+function loadProviderEntries(): LoadedProvider[] {
   const root = join(here, '..', 'providers')
   try {
     return readdirSync(root, { withFileTypes: true })
       .filter(entry => entry.isDirectory())
       .flatMap(entry => {
+        const dir = join(root, entry.name)
         try {
-          const raw = readFileSync(join(root, entry.name, 'provider.json'), 'utf8')
-          return [JSON.parse(raw) as ProviderDescriptor]
+          const raw = readFileSync(join(dir, 'provider.json'), 'utf8')
+          return [{ descriptor: JSON.parse(raw) as ProviderDescriptor, dir }]
         } catch {
           return []
         }
@@ -47,12 +62,83 @@ function loadProviders(): ProviderDescriptor[] {
   }
 }
 
+function loadProviders(): ProviderDescriptor[] {
+  return loadProviderEntries().map(entry => entry.descriptor)
+}
+
+function iconMime(file: string): string {
+  switch (extname(file).toLowerCase()) {
+    case '.svg':
+      return 'image/svg+xml'
+    case '.png':
+      return 'image/png'
+    case '.webp':
+      return 'image/webp'
+    case '.ico':
+      return 'image/x-icon'
+    case '.jpg':
+      return 'image/jpeg'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
 interface RouteFace {
   register(route: {
     kind: 'prefix' | 'exact'
     path: string
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>
   }): () => void
+}
+
+/** Narrow slice of DSH's live `workspaceRegistry` service. */
+interface WorkspaceEntityFace {
+  path: string
+  sessionIds: string[]
+  attachSession(sessionId: string): Promise<void>
+  detachSession(sessionId: string): Promise<void>
+}
+
+interface WorkspaceRegistryFace {
+  create(path: string, title: string): Promise<WorkspaceEntityFace>
+  resolveByPath(path: string): Promise<WorkspaceEntityFace | undefined>
+  list(): WorkspaceEntityFace[]
+}
+
+/** Narrow slice of the live agent registry; agents live for the host process. */
+interface LiveAgentFace {
+  status: string
+  cancel(cause: unknown, options?: unknown): void
+  whenIdle(): Promise<void>
+  scope?: { dispose?(): Promise<void> }
+}
+
+interface AgentRegistryFace {
+  get(id: string): LiveAgentFace | undefined
+  store?: Map<string, unknown>
+  detachEntered?(entry: unknown): void
+}
+
+/** Narrow slice of the live session store. */
+interface HostSessionsFace {
+  get(id: string): { id: string } | undefined
+  liveEntryFor?(session: unknown): { detach(): void }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      value => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      cause => {
+        clearTimeout(timer)
+        reject(cause)
+      },
+    )
+  })
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -81,21 +167,20 @@ function importOptionsFrom(body: Record<string, unknown>): ImportOptions {
 }
 
 export function apply(ctx: Context): () => void {
-  void backfillWorkspaces()
-    .then(result => {
-      if (result.scanned === 0) return
-      console.info(`[dsh-session-import] 工作区自愈：扫描 ${result.scanned} 条，挂载 ${result.attached} 条`)
-    })
-    .catch(cause => console.warn('[dsh-session-import] 工作区自愈失败', cause))
-
+  // Workspace membership is established at import time. Never re-attach on
+  // startup: deleting a Workspace is an explicit user action, and DSH keeps
+  // its Sessions under 「未分组」 rather than recreating the group.
   const loose = ctx as Context & { get?: (service: string) => unknown }
   const webServer = loose.get?.('webServer') as RouteFace | undefined
   const rawPersistence = loose.get?.('sessionPersistence') as
     | {
         create(header: unknown, options?: unknown): Promise<SessionHandle>
         open(id: unknown, access: unknown, options?: unknown): Promise<SessionHandle>
+        stat?(id: unknown, options?: unknown): Promise<{ header: SessionHeaderLike } | undefined>
       }
     | undefined
+  const projectionCache = (): ProjectionCachePort | undefined =>
+    loose.get?.('sessionProjectionCache') as ProjectionCachePort | undefined
 
   // DSH hands out per-session handles; the importer only needs this narrow slice.
   const persistence: PersistencePort | undefined =
@@ -104,7 +189,113 @@ export function apply(ctx: Context): () => void {
       : {
           create: header => rawPersistence.create(header),
           open: (id, access) => rawPersistence.open(id, access ?? 'read'),
+          ...(typeof rawPersistence.stat === 'function'
+            ? { stat: async (id: string) => rawPersistence.stat?.(id) }
+            : {}),
         }
+
+  if (persistence !== undefined) {
+    // The projection cache mounts after this plugin, so wait for the service
+    // instead of sampling `get()` during apply.
+    ctx.inject(['sessionProjectionCache'], cacheCtx => {
+      const cache = cacheCtx.get('sessionProjectionCache') as ProjectionCachePort | undefined
+      void backfillTitles(persistence, cache)
+        .then(result => {
+          if (result.titled > 0 || result.warmed > 0) {
+            console.info(
+              `[dsh-session-import] 标题回填：${result.titled}/${result.scanned}，投影预热：${result.warmed}/${result.scanned}`,
+            )
+          }
+        })
+        .catch(cause => console.warn('[dsh-session-import] 标题回填失败', cause))
+    })
+  }
+
+  // Live attach through the running registry so the sidebar updates immediately.
+  // The file writer remains as a fallback for hosts without the service.
+  const workspace: WorkspacePort = {
+    attach: async (sessionId, cwd) => {
+      if (cwd === undefined || cwd === '') return { attached: false, reason: '会话没有 cwd' }
+      const registry = loose.get?.('workspaceRegistry') as WorkspaceRegistryFace | undefined
+      if (registry === undefined || typeof registry.create !== 'function') {
+        return attachSessionToWorkspace(dshHome(), sessionId, cwd)
+      }
+      try {
+        const entity =
+          (await registry.resolveByPath(cwd)) ?? (await registry.create(cwd, basename(cwd) || cwd))
+        await entity.attachSession(sessionId)
+        return { attached: true, workspacePath: entity.path }
+      } catch (cause) {
+        console.warn('[dsh-session-import] 在线挂载失败，回退文件', cause)
+        return attachSessionToWorkspace(dshHome(), sessionId, cwd)
+      }
+    },
+    detach: async sessionId => {
+      const registry = loose.get?.('workspaceRegistry') as WorkspaceRegistryFace | undefined
+      if (registry !== undefined && typeof registry.list === 'function') {
+        try {
+          for (const entity of registry.list()) {
+            if (Array.isArray(entity.sessionIds) && entity.sessionIds.includes(sessionId)) {
+              await entity.detachSession(sessionId)
+              return true
+            }
+          }
+        } catch (cause) {
+          console.warn('[dsh-session-import] 在线撤回挂载失败，回退文件', cause)
+        }
+      }
+      return detachSessionFromWorkspaces(dshHome(), sessionId)
+    },
+  }
+
+  // A Session that was ever opened stays resident in the host for the life of
+  // the process, and `session/list` keeps returning it even after its log is
+  // gone. Retraction therefore has to run DSH's own teardown first: stop the
+  // agent, drop its scope, then unregister the agent and session. The steps are
+  // idempotent, so the owner fiber's later teardown remains safe.
+  const retractRuntime: RetractRuntime = {
+    liveStatus: sessionId => {
+      const registry = loose.get?.('agents') as AgentRegistryFace | undefined
+      const agent = registry?.get(sessionId)
+      if (agent !== undefined) return agent.status
+      const sessions = loose.get?.('sessions') as HostSessionsFace | undefined
+      return sessions?.get(sessionId) === undefined ? undefined : 'attached'
+    },
+    evict: async sessionId => {
+      const registry = loose.get?.('agents') as AgentRegistryFace | undefined
+      const agent = registry?.get(sessionId)
+      if (agent !== undefined) {
+        try {
+          agent.cancel({ kind: 'disposed' })
+        } catch (cause) {
+          console.warn('[dsh-session-import] 停止会话失败', cause)
+        }
+        await withTimeout(agent.whenIdle(), 5000, '该会话仍在收尾，请稍后再撤回')
+        try {
+          await agent.scope?.dispose?.()
+        } catch (cause) {
+          console.warn('[dsh-session-import] 释放会话作用域失败', cause)
+        }
+        const entry = registry?.store?.get(sessionId)
+        if (entry !== undefined) {
+          try {
+            registry?.detachEntered?.(entry)
+          } catch (cause) {
+            console.warn('[dsh-session-import] 注销会话 Agent 失败', cause)
+          }
+        }
+      }
+      const sessions = loose.get?.('sessions') as HostSessionsFace | undefined
+      const session = sessions?.get(sessionId)
+      if (session !== undefined) {
+        try {
+          sessions?.liveEntryFor?.(session)?.detach()
+        } catch (cause) {
+          throw new Error(`无法从 DSH 会话列表移除该会话：${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      }
+    },
+  }
 
   if (typeof webServer?.register !== 'function') {
     console.warn('[dsh-session-import] webServer 服务不可用，HTTP 接口未挂载')
@@ -124,13 +315,20 @@ export function apply(ctx: Context): () => void {
             ok: true,
             plugin: name,
             version,
-            providers: loadProviders().map(provider => ({
+            providers: loadProviderEntries().map(({ descriptor: provider }) => ({
               id: provider.id,
               name: provider.name,
               family: provider.family,
               assets: Object.keys(provider.assets),
+              ...(provider.icon === undefined
+                ? {}
+                : { icon: `${ROUTE_PREFIX}/api/icon?provider=${encodeURIComponent(provider.id)}` }),
             })),
-            services: { persistence: persistence !== undefined },
+            services: {
+              persistence: persistence !== undefined,
+              projectionCache: projectionCache() !== undefined,
+              workspaceRegistry: loose.get?.('workspaceRegistry') !== undefined,
+            },
           })
           return
         }
@@ -142,7 +340,7 @@ export function apply(ctx: Context): () => void {
             sendJson(res, 400, { ok: false, error: 'unknown-provider', providerId })
             return
           }
-          const records = await loadRecords()
+          const records = await loadLiveRecords()
           const sessions = await scanProvider(provider, records)
           sendJson(res, 200, { ok: true, providerId, count: sessions.length, sessions })
           return
@@ -165,7 +363,8 @@ export function apply(ctx: Context): () => void {
             providerId,
             sourcePath,
             options: importOptionsFrom(body),
-          })
+            provider,
+          }, workspace, projectionCache())
           sendJson(res, 200, { ok: result.status !== 'failed', result })
           return
         }
@@ -178,8 +377,34 @@ export function apply(ctx: Context): () => void {
             sendJson(res, 400, { ok: false, error: 'providerId 与 sourceSessionId 必填' })
             return
           }
-          const result = await retractImport(providerId, sourceSessionId)
+          const result = await retractImport(providerId, sourceSessionId, workspace, retractRuntime)
           sendJson(res, 200, { ok: true, result })
+          return
+        }
+
+        if (path === `${ROUTE_PREFIX}/api/icon`) {
+          const providerId = url.searchParams.get('provider') ?? ''
+          const entry = loadProviderEntries().find(item => item.descriptor.id === providerId)
+          const icon = entry?.descriptor.icon
+          if (entry === undefined || icon === undefined) {
+            sendJson(res, 404, { ok: false, error: 'no-icon' })
+            return
+          }
+          const base = resolve(entry.dir)
+          const file = resolve(base, icon)
+          if (!file.startsWith(base + sep)) {
+            sendJson(res, 400, { ok: false, error: 'bad-icon-path' })
+            return
+          }
+          try {
+            const data = readFileSync(file)
+            res.statusCode = 200
+            res.setHeader('content-type', iconMime(file))
+            res.setHeader('cache-control', 'public, max-age=3600')
+            res.end(data)
+          } catch {
+            sendJson(res, 404, { ok: false, error: 'icon-missing' })
+          }
           return
         }
 

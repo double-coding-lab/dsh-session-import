@@ -137,6 +137,35 @@ function walkDown(
 }
 
 /**
+ * Newest childless message record. A source tool writes `active-leaf` on a
+ * clean shutdown; a crash or an interrupted session leaves the marker out, and
+ * refusing the whole transcript is wrong — the mainline is still recoverable.
+ * Prefer non-sidechain leaves so a subagent tail cannot hijack the mainline.
+ */
+function newestLeaf(byUuid: Map<string, RawRecord>): RawRecord | undefined {
+  const parentIds = new Set<string>()
+  for (const record of byUuid.values()) {
+    if (typeof record.parentUuid === 'string') parentIds.add(record.parentUuid)
+  }
+  const pick = (allowSidechain: boolean): RawRecord | undefined => {
+    let best: RawRecord | undefined
+    let bestTime = Number.NEGATIVE_INFINITY
+    for (const record of byUuid.values()) {
+      if (!isMessageRecord(record) || record.uuid === undefined) continue
+      if (!allowSidechain && record.isSidechain === true) continue
+      if (parentIds.has(record.uuid)) continue
+      const time = toTime(record.timestamp) ?? Number.NEGATIVE_INFINITY
+      if (time > bestTime) {
+        best = record
+        bestTime = time
+      }
+    }
+    return best
+  }
+  return pick(false) ?? pick(true)
+}
+
+/**
  * Reassemble the whole conversation, not just the chain behind the active leaf.
  *
  * A source tool that compacts its context rewrites the transcript so the
@@ -189,6 +218,34 @@ const INJECTED_PREFIXES = [
 /** Skill bodies arrive as user messages; they are tool context, not human input. */
 const SKILL_INJECTION_PREFIXES = ['Base directory for this skill']
 
+/** System-generated "user" turns: task notifications, interruptions, XML context. */
+function isSyntheticUserText(text: string): boolean {
+  const trimmed = text.trimStart()
+  if (trimmed.startsWith('<')) return true
+  if (trimmed.startsWith('This session is being continued')) return true
+  return trimmed.startsWith('[SYSTEM NOTIFICATION') || trimmed.startsWith('[Request interrupted')
+}
+
+/** Markdown / skill-invocation links read as noise in a title; keep the label. */
+function plainText(text: string): string {
+  return text.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim()
+}
+
+/** People paste a task id or a file path before the actual request; drop it. */
+const LEADING_UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[\s:：-]*/
+const LEADING_PATH = /^(?:[A-Za-z]:[\\/]|\/|~[\\/])\S*\s*/
+
+/** Shared by the parser and the picker list so both show the same clean title. */
+export function cleanTitleText(raw: string): string | undefined {
+  let text = raw.trim()
+  if (text.length < 2) return undefined
+  if (INJECTED_PREFIXES.some(prefix => text.startsWith(prefix))) return undefined
+  text = text.replace(LEADING_UUID, '').replace(LEADING_PATH, '').trim()
+  text = text.split(/附件引用[：:]/)[0]!.trim()
+  const title = plainText(text).slice(0, 80)
+  return title === '' ? undefined : title
+}
+
 /**
  * Pick a human-meaningful title. The first user records in a transcript are
  * usually injected context (skill listings, continuations, reminders), so we
@@ -197,11 +254,8 @@ const SKILL_INJECTION_PREFIXES = ['Base directory for this skill']
 function pickTitle(events: SourceEvent[]): string | undefined {
   for (const event of events) {
     if (event.kind !== 'user') continue
-    const text = event.text.trim()
-    if (text.length < 2) continue
-    if (INJECTED_PREFIXES.some(prefix => text.startsWith(prefix))) continue
-    const title = text.replace(/\s+/g, ' ').slice(0, 80)
-    if (title !== '') return title
+    const title = cleanTitleText(event.text)
+    if (title !== undefined) return title
   }
   return undefined
 }
@@ -278,7 +332,9 @@ export async function parseClaudeJsonl(
     if (typeof record.uuid === 'string') byUuid.set(record.uuid, record)
   }
 
-  const mainline = mainlineOf(byUuid, leafUuid)
+  const activeLeaf = leafUuid === undefined ? undefined : byUuid.get(leafUuid)
+  const resolvedLeaf = activeLeaf ?? newestLeaf(byUuid)
+  const mainline = mainlineOf(byUuid, resolvedLeaf?.uuid)
   stats.mainlineRecords = mainline.length
 
   // Full history: the entire mainline, from the first record on. Compaction is
@@ -329,11 +385,15 @@ export async function parseClaudeJsonl(
       }
       if (texts.length > 0) {
         const joined = texts.join('\n\n')
+        const continuation = joined.startsWith('This session is being continued')
         // The source tool injects skill bodies as user messages. Keeping them
         // imports whole skill documents as if the human had typed them, which
-        // both bloats the window and fabricates turns. The continuation
-        // summary is different: it IS the head context of the window.
-        if (SKILL_INJECTION_PREFIXES.some(prefix => joined.startsWith(prefix))) {
+        // both bloats the window and fabricates turns. Continuation summaries
+        // are tool context too, but they mark a new context segment: close the
+        // previous turn here so a resumed session's idle gap is not reported
+        // as work time in the turn footer.
+        if (SKILL_INJECTION_PREFIXES.some(prefix => joined.startsWith(prefix)) || isSyntheticUserText(joined)) {
+          if (continuation) push({ kind: 'turn-boundary', time })
           injectedUserMessages += 1
         } else {
           push({ kind: 'turn-boundary', time })

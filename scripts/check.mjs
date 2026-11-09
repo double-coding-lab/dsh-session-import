@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = resolve(root, 'fixtures', 'sample.jsonl')
+const recoveryFixture = resolve(root, 'fixtures', 'no-active-leaf.jsonl')
 
 /** Resolve esbuild: local install first, then an explicit override. */
 function esbuildBin() {
@@ -55,6 +56,9 @@ try {
   if (!existsSync(fixture)) throw new Error(`缺少 fixture：${fixture}`)
   run('结构自检（fixture）', process.execPath, ['scripts/verify.ts', fixture])
   run('导入幂等自检（fixture）', process.execPath, ['scripts/test-importer.ts', fixture])
+  run('文件链接自检', process.execPath, ['scripts/test-file-links.ts'])
+  run('无 active-leaf 恢复自检', process.execPath, ['scripts/test-recovery.ts'])
+  run('无 active-leaf 导入自检', process.execPath, ['scripts/test-importer.ts', recoveryFixture])
   run('增量追平自检', process.execPath, ['scripts/test-growth.ts'])
 
   console.log('\n✅ 全部通过：')

@@ -28,6 +28,32 @@ export interface SessionHandle {
   read(offset?: number, length?: number): Promise<{ events: readonly DshEvent[] }>
 }
 
+/** The immutable header fields the projection cache binds its checkpoint to. */
+export interface SessionHeaderLike {
+  version: number
+  id: string
+  createdAt: number
+  cwd?: string
+  isSeeded: boolean
+}
+
+/**
+ * DSH's persistent projection cache. A cold session-list row reads its title
+ * from this cache only, so an imported log needs a checkpoint to show a name
+ * before the session is opened.
+ */
+export interface ProjectionCachePort {
+  coldSnapshot(
+    meta: SessionHeaderLike,
+    inheritedEventCount: number,
+    events: readonly DshEvent[],
+  ): unknown
+  cachedSnapshot?(
+    meta: SessionHeaderLike,
+    keys?: readonly string[],
+  ): { values: Record<string, unknown> } | undefined
+}
+
 export interface PersistencePort {
   create(header: {
     version: number
@@ -40,6 +66,8 @@ export interface PersistencePort {
   }): Promise<SessionHandle>
   /** Read or open-for-append an existing log. */
   open(id: string, access?: 'read' | 'write'): Promise<SessionHandle>
+  /** Header-only read; used to bind the projection cache checkpoint. */
+  stat?(id: string): Promise<{ header: SessionHeaderLike } | undefined>
 }
 
 export interface ImportDeps {
@@ -51,6 +79,30 @@ export interface ImportDeps {
 /** Session ids are namespaced so two providers cannot collide. */
 export function importedSessionId(providerId: string, sourceSessionId: string): string {
   return `import-${providerId}-${sourceSessionId}`
+}
+
+const TITLE_EVENT_TYPE = 'session/title'
+
+/**
+ * The sidebar reads a session's title from this log event; without it the
+ * imported session shows as 「未命名」. Fallback source = deterministic,
+ * no model call.
+ */
+export function sessionTitleEvent(title: string | undefined, events: readonly DshEvent[]): DshEvent | undefined {
+  if (title === undefined) return undefined
+  const text = title.replace(/[\u0000-\u001f\u007f\u009b]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (text === '') return undefined
+  const firstUser = events.find(event => event.type === 'user/message')
+  return {
+    type: TITLE_EVENT_TYPE,
+    seq: events.length,
+    time: events.at(-1)?.time ?? Date.now(),
+    data: {
+      title: text.slice(0, 60),
+      messageSeqs: firstUser === undefined ? [] : [firstUser.seq],
+      source: { kind: 'fallback' },
+    },
+  }
 }
 
 /** First line of the source file, for the cheap rewrite fingerprint. */
@@ -132,18 +184,21 @@ export async function importSession(
   // window that slid (compaction, truncation) changes the prefix, which makes
   // appending unsafe — refuse instead of corrupting the log.
   if (existing !== undefined) {
-    // Legacy records predate the append cursor; recover it from the stored log.
     let previous = existing.importedEventCount
     let previousHash = existing.prefixHash
-    if (previous === undefined || previousHash === undefined) {
-      const probe = await deps.persistence.open(existing.dshSessionId, 'read')
-      try {
-        const page = await probe.read()
-        previous = page.events.length
-        previousHash = prefixHashOf(page.events, Math.min(64, previous))
-      } finally {
-        await probe.close()
+    let cursor = 0
+    const probe = await deps.persistence.open(existing.dshSessionId, 'read')
+    try {
+      const page = await probe.read()
+      cursor = page.events.length
+      // Legacy records predate the append cursor; recover it from the stored log.
+      if (previous === undefined || previousHash === undefined) {
+        const storedMapped = page.events.filter(event => event.type !== TITLE_EVENT_TYPE)
+        previous = storedMapped.length
+        previousHash = prefixHashOf(storedMapped, Math.min(64, previous))
       }
+    } finally {
+      await probe.close()
     }
     const hash = prefixHashOf(mapped.events, Math.min(64, previous))
     if (previousHash !== hash) {
@@ -176,7 +231,7 @@ export async function importSession(
       }
     }
 
-    const tail = mapped.events.slice(previous).map((event, index) => ({ ...event, seq: previous + index }))
+    const tail = mapped.events.slice(previous).map((event, index) => ({ ...event, seq: cursor + index }))
     const writeHandle = await deps.persistence.open(existing.dshSessionId, 'write')
     try {
       await writeHandle.append(tail)
@@ -219,8 +274,10 @@ export async function importSession(
   signal?.throwIfAborted()
 
   const rebased = mapped.events.map((event, index) => ({ ...event, seq: index }))
+  const titleEvent = sessionTitleEvent(parsed.title, rebased)
+  const appended = titleEvent === undefined ? rebased : [...rebased, titleEvent]
   try {
-    await handle.append(rebased)
+    await handle.append(appended)
     await handle.flush()
   } finally {
     await handle.close()
@@ -237,7 +294,7 @@ export async function importSession(
     await readHandle.close()
   }
 
-  if (storedCount < rebased.length) {
+  if (storedCount < appended.length) {
     return {
       status: 'failed',
       providerId: parsed.providerId,
@@ -247,7 +304,7 @@ export async function importSession(
       events: rebased.length,
       truncated: mapped.truncated,
       repaired: mapped.repairedCalls,
-      message: `回读校验失败：写入 ${rebased.length} 条，读回 ${storedCount} 条`,
+      message: `回读校验失败：写入 ${appended.length} 条，读回 ${storedCount} 条`,
     }
   }
 
@@ -259,7 +316,7 @@ export async function importSession(
     dshSessionId: sessionId,
     importedTurns: mapped.turns,
     importedEventCount: rebased.length,
-    prefixHash: prefixHashOf(rebased, rebased.length),
+    prefixHash: prefixHashOf(rebased, Math.min(64, rebased.length)),
     importedAt: now(),
     lastImportAt: now(),
     status: 'ok',

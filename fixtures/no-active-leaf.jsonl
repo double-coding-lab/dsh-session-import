@@ -1,0 +1,6 @@
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"fixture-no-active-leaf","timestamp":"2026-11-03T00:00:00.000Z","workspace-directories":{"directories":["E:\\demo\\project"]},"message":{"role":"user","content":[{"type":"text","text":"你好"}]}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"fixture-no-active-leaf","timestamp":"2026-11-03T00:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"你好！有什么可以帮你的？"}]}}
+{"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"fixture-no-active-leaf","timestamp":"2026-11-03T00:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"继续"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"u2","sessionId":"fixture-no-active-leaf","timestamp":"2026-11-03T00:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"收到，继续处理。"}]}}
+{"type":"assistant","uuid":"a-alt","parentUuid":"a1","sessionId":"fixture-no-active-leaf","timestamp":"2026-11-03T00:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"这是一条被放弃的分支。"}]}}
+{"type":"runtime-config","sessionId":"fixture-no-active-leaf","model":"ultimate","timestamp":"2026-11-03T00:00:05.000Z"}

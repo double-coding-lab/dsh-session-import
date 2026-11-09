@@ -3,6 +3,7 @@
   "schemaVersion": 1,
   "id": "claude-code",
   "name": "Claude Code",
+  "icon": "icon.svg",
   "family": "claude-jsonl",
   "assets": {
     "sessions": {

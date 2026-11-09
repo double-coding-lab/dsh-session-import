@@ -14,6 +14,11 @@
       "description": "稳定标识，同时是 providers/<id>/ 目录名"
     },
     "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "icon": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+\\.(png|svg|webp|ico|jpg)$",
+      "description": "官方应用图标，相对 provider 目录的文件名"
+    },
     "family": {
       "type": "string",
       "enum": ["claude-jsonl", "codex-jsonl"],
@@ -25,6 +30,17 @@
       "minProperties": 1,
       "properties": {
         "sessions": { "$ref": "#/$defs/sessionsAsset" }
+      }
+    },
+    "fileLinks": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "该 provider 的本地文件链接写法；由通用适配器改写为 DSH 原生可点击文件，规则本身不写代码",
+      "properties": {
+        "assistant": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fileLinkRule" }
+        }
       }
     },
     "capabilities": {
@@ -39,6 +55,29 @@
     }
   },
   "$defs": {
+    "fileLinkRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["syntax", "accept"],
+      "properties": {
+        "syntax": {
+          "const": "markdown-link",
+          "description": "源文本中的链接语法；新增语法由适配器扩展"
+        },
+        "accept": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["file-url", "absolute-path", "relative-path"] },
+          "description": "哪些链接目标算本地文件；relative-path 基于会话 cwd 解析"
+        },
+        "extensions": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^\\.[A-Za-z0-9]+$" },
+          "description": "可选扩展名白名单，如 [\".md\", \".pdf\"]；为空表示不限"
+        }
+      }
+    },
     "paths": {
       "type": "array",
       "minItems": 1,

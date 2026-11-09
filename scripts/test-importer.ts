@@ -101,7 +101,7 @@ console.log('second ', second.status, second.message ?? '')
 const problems: string[] = []
 if (first.status !== 'imported') problems.push(`首次导入应为 imported，实际 ${first.status}`)
 if (stored === undefined) problems.push('没有落盘会话')
-if (stored !== undefined && stored.events.length !== first.events) problems.push('写入条数与返回值不一致')
+if (stored !== undefined && stored.events.filter(event => event.type !== 'session/title').length !== first.events) problems.push('写入条数与返回值不一致')
 if (second.status !== 'skipped') problems.push(`重复导入应为 skipped，实际 ${second.status}`)
 if (persistence.sessions.size !== 1) problems.push(`会话数应为 1，实际 ${persistence.sessions.size}`)
 

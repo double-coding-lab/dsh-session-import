@@ -55,10 +55,15 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
   let step = 0
   let turnOpen = false
   let stepOpen = false
+  /** DSH resumes append their own system/message; the first surface node must be one. */
+  let systemHead = false
   let repairedCalls = 0
   let orphanResults = 0
   let droppedReasoning = 0
   let estimatedChars = 0
+  /** Files already declared in this turn; `deliverables/presented` is per path. */
+  const presentedPaths = new Set<string>()
+  let presentedCalls = 0
 
   const openCalls = new Set<string>()
   /** Deterministic message ids keep re-mapping byte-identical (needed for the growth prefix hash). */
@@ -112,6 +117,7 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
     turn += 1
     // Step numbering restarts per turn: DSH validates the next step as 1.
     step = 0
+    presentedPaths.clear()
     push('turn/start', time, { turn })
     turnOpen = true
   }
@@ -122,6 +128,22 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
     step += 1
     push('step/start', time, { turn, step })
     stepOpen = true
+    // An empty system node is valid, never projects into model input, and
+    // marks the protected surface head DSH requires before later resumes can
+    // append their own system/message events.
+    if (!systemHead) {
+      push('system/message', time, {
+        turn,
+        step,
+        message: {
+          id: 'imp-system',
+          role: 'system',
+          content: [],
+          source: { kind: 'system-prompt' },
+        },
+      }, true)
+      systemHead = true
+    }
   }
 
   const windowed = source
@@ -130,12 +152,21 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
     const event = windowed[index]!
     switch (event.kind) {
       case 'turn-boundary': {
-        closeTurn(event.time)
+        // The boundary carries the *next* user message's time. Closing the
+        // previous turn with it would count the user's idle gap as work time
+        // (imported transcripts often resume hours or days later).
+        closeTurn(events.at(-1)?.time ?? event.time)
         break
       }
       case 'user': {
-        closeStep(event.time)
-        ensureTurn(event.time)
+        if (systemHead) {
+          closeStep(event.time)
+          ensureTurn(event.time)
+        } else {
+          // The first user message shares the system head's step, matching how
+          // a native session opens.
+          ensureStep(event.time)
+        }
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
         push('user/message', event.time, {
@@ -153,6 +184,23 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         ensureStep(event.time)
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
+        // DSH only renders an inline-code path as a clickable file chip when
+        // the same turn declares that file as a deliverable. Presenting is the
+        // native mechanism; it carries no surface node, so the transcript keeps
+        // the same shape as the source.
+        const freshFiles = (event.files ?? []).filter(file => !presentedPaths.has(file.path))
+        if (freshFiles.length > 0) {
+          for (const file of freshFiles) presentedPaths.add(file.path)
+          presentedCalls += 1
+          push('deliverables/presented', event.time, {
+            turn,
+            callId: `imp-present-${presentedCalls}`,
+            files: freshFiles.map(file => ({
+              path: file.path,
+              ...(file.description === undefined ? {} : { description: file.description }),
+            })),
+          })
+        }
         // DSH admits a tool/call only if an assistant message advertised it, so
         // the calls that immediately follow ride along in this message.
         const content: Record<string, unknown>[] = [{ type: 'text', text }]

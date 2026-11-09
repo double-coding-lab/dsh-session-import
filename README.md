@@ -34,6 +34,16 @@ dsh plugin --profile web add link:<本仓库路径>
 
 状态徽标：`未导入` / `已导入` / `有新增` / `失败`。已导入的行有「撤回」。
 
+## 文件链接
+
+源会话里指向本地文件的链接会按 provider 规则保留为 DSH 原生文件 chip：点击后在右侧栏预览，不依赖浏览器协议。
+
+- 规则是 `provider.json` 里的 `fileLinks` 纯数据；Qoder 识别 `[文件名](file:///D:/…)`，其他工具可声明绝对路径或工作区相对路径。
+- 导入时链接会改成 inline code（同名文件用完整路径区分），同时写入该轮的 `deliverables/presented`，由 DSH 自带的文件提及解析器接管点击。
+- DSH 只在每轮**收尾的** assistant 消息上提供文件提及解析，因此轮中过程消息里的链接保持普通文本。
+- 本次升级前已导入的会话需要「撤回」后重新导入；源文件没变时重复导入会直接跳过，不会自动改写旧日志。
+
+
 ## 三条核心设计
 
 **1. 只导入"能续聊的窗口"。**
@@ -44,6 +54,9 @@ dsh plugin --profile web add link:<本仓库路径>
 
 **3. 结构必须能被 DSH 读回。**
 导入后立刻用 `persistence.open()` 回读校验事件条数；DSH 的 v4 校验比我们的自检更严，读不回就当失败，绝不留下半截会话。
+
+**4. 中断的源会话也能导入。**
+Qoder 正常退出才写 `active-leaf`；崩溃或中断的会话没有这个标记，解析器会取最新的一条叶子消息恢复主线，并排除被放弃的分支，不再报「解析后没有可导入的事件」。
 
 ## 开发
 
@@ -77,8 +90,9 @@ src/
     importer.ts         创建/追加/回读校验、指纹、前缀哈希
     state.ts            幂等台账（<DSH_HOME>/session-import/state.json）
     mapper.ts           源事件 → DSH v4 事件（turn/step/tool 状态机）
+    file-links.ts       按 provider 规则识别本地文件链接，改成 DSH 原生文件 chip
     parsers/            按 family 分的解析器（claude-jsonl）
-providers/<id>/provider.json   纯数据：会话在哪、怎么解析
+providers/<id>/provider.json   纯数据：会话在哪、怎么解析、文件链接怎么写
 fixtures/                       自检样本（含孤儿调用与压缩点）
 ```
 

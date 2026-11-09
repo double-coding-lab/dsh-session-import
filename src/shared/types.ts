@@ -32,16 +32,49 @@ export interface SessionAsset {
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
 }
 
+/** A local file syntax a provider writes into assistant text. */
+export type FileLinkSyntax = 'markdown-link'
+
+/** Which link destinations count as local files for a rule. */
+export type FileLinkAccept = 'file-url' | 'absolute-path' | 'relative-path'
+
+/**
+ * One provider-level file-link rule. Providers differ: Qoder writes
+ * `[name](file:///D:/…)`; another tool may emit bare absolute or workspace
+ * relative paths. The adapter is shared, the rule is data.
+ */
+export interface FileLinkRule {
+  syntax: FileLinkSyntax
+  accept: FileLinkAccept[]
+  /** Optional extension gate (`[".md", ".pdf"]`); empty or absent accepts any. */
+  extensions?: string[]
+}
+
+export interface FileLinksAsset {
+  assistant?: FileLinkRule[]
+}
+
+/** One local file referenced by a source assistant message. */
+export interface SourceFileReference {
+  /** Absolute path, as declared after provider normalization. */
+  path: string
+  /** The link label when it adds information beyond the file name. */
+  description?: string
+}
+
 /** One built-in provider entry (`providers/<id>/provider.json`). Pure data. */
 export interface ProviderDescriptor {
   schemaVersion: 1
   id: string
   name: string
+  /** Official app icon, relative to the provider directory (png/svg/webp/ico/jpg). */
+  icon?: string
   family: SourceFamily
   assets: {
     /** Only sessions are supported: DSH has no consumer for anything else. */
     sessions?: SessionAsset
   }
+  fileLinks?: FileLinksAsset
   capabilities?: {
     resume?: boolean
     images?: boolean
@@ -53,7 +86,7 @@ export interface ProviderDescriptor {
 /** A normalized conversation event, independent of any tool's format. */
 export type SourceEvent =
   | { kind: 'user'; time: number; text: string }
-  | { kind: 'assistant'; time: number; text: string; model?: string }
+  | { kind: 'assistant'; time: number; text: string; model?: string; files?: SourceFileReference[] }
   | { kind: 'reasoning'; time: number; text: string }
   | { kind: 'tool-call'; time: number; callId: string; name: string; args: string }
   | { kind: 'tool-result'; time: number; callId: string; text: string; isError?: boolean }
