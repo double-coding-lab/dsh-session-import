@@ -30,6 +30,11 @@ export interface SessionAsset {
   layout: ProviderLayout
   cwd?: { from?: string }
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
+  /**
+   * Machine-only transcripts (plugin telemetry, acks) that the picker hides.
+   * Matched on the parsed title so no provider id branch is needed.
+   */
+  ignore?: { titlePrefixes?: string[] }
 }
 
 /** A local file syntax a provider writes into assistant text. */
@@ -83,9 +88,27 @@ export interface ProviderDescriptor {
   }
 }
 
+/** An image the source tool attached to a user message. */
+export interface SourceImage {
+  /** Local copy on disk (Qoder keeps one under `~/.qoder/tmp/<project>/images/<session>/`). */
+  localPath?: string
+  /** Provider URL (signed, may expire) or a `data:` URL. */
+  url?: string
+}
+
+/** Durable DSH image reference embedded in a stored message block. */
+export interface DshImageRef {
+  attachmentId: string
+  mediaType: string
+  width: number
+  height: number
+  bytes: number
+  name?: string
+}
+
 /** A normalized conversation event, independent of any tool's format. */
 export type SourceEvent =
-  | { kind: 'user'; time: number; text: string }
+  | { kind: 'user'; time: number; text: string; images?: SourceImage[]; imageRefs?: DshImageRef[] }
   | { kind: 'assistant'; time: number; text: string; model?: string; files?: SourceFileReference[] }
   | { kind: 'reasoning'; time: number; text: string }
   | { kind: 'tool-call'; time: number; callId: string; name: string; args: string }
@@ -143,6 +166,8 @@ export interface ImportRecord {
   importedEventCount: number
   /** Hash of the leading events, to detect a source window that slid. */
   prefixHash: string
+  /** Hash of the mapped events just before the append cursor; detects parser drift. */
+  boundaryHash?: string
   importedAt: number
   lastImportAt: number
   status: 'ok' | 'partial' | 'failed'

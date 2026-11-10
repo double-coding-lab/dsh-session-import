@@ -169,10 +169,13 @@ export function mapToDshEvents(source: SourceEvent[], options: ImportOptions): M
         }
         const text = truncate(event.text, options.perTextLimit, truncated)
         estimatedChars += text.length
+        const content: unknown[] = (event.imageRefs ?? []).map(ref => ({ type: 'image', attachment: ref }))
+        if (text !== '') content.push({ type: 'text', text })
+        if (content.length === 0) break
         push('user/message', event.time, {
           id: nextMessageId(),
           role: 'user',
-          content: [{ type: 'text', text }],
+          content,
           source: { kind: 'user' },
         }, true)
         break

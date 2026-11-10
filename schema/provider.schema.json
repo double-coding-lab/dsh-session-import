@@ -122,6 +122,18 @@
             "fields": { "type": "array", "items": { "type": "string" } },
             "fromFirstUserMessage": { "type": "boolean" }
           }
+        },
+        "ignore": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "机器遥测类转录（插件上报、回执）不当作可导入会话",
+          "properties": {
+            "titlePrefixes": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "解析出的标题以这些前缀开头时忽略该转录"
+            }
+          }
         }
       }
     }

@@ -108,7 +108,7 @@ export async function attachSessionToWorkspace(
   return { attached: true, workspacePath: entry.path }
 }
 
-/** Drop `sessionId` from every workspace so a retracted import leaves no ghost row. */
+/** Drop `sessionId` from every workspace and unregister workspaces left empty. */
 export async function detachSessionFromWorkspaces(dshHome: string, sessionId: string): Promise<boolean> {
   const file = storageFile(dshHome)
   if (!existsSync(file)) return false
@@ -117,12 +117,28 @@ export async function detachSessionFromWorkspaces(dshHome: string, sessionId: st
   if (workspaces === undefined) return false
 
   let changed = false
-  for (const entry of Object.values(workspaces)) {
+  const removed: string[] = []
+  for (const [id, entry] of Object.entries(workspaces)) {
     const index = entry.sessionIds.indexOf(sessionId)
     if (index < 0) continue
     entry.sessionIds.splice(index, 1)
     entry.updatedAt = new Date().toISOString()
     changed = true
+    if (entry.sessionIds.length === 0) {
+      // DSH's own delete() keeps the directory and session logs; mirror that
+      // here so an empty import-only workspace does not linger in the sidebar.
+      delete workspaces[id]
+      removed.push(id)
+    }
+  }
+  if (removed.length > 0) {
+    const global = (store.global ?? {}) as Record<string, unknown>
+    if (Array.isArray(global['workspaceIds'])) {
+      global['workspaceIds'] = (global['workspaceIds'] as unknown[]).filter(
+        value => typeof value !== 'string' || !removed.includes(value),
+      )
+    }
+    store.global = global
   }
   if (changed) await writeStore(file, store)
   return changed

@@ -34,6 +34,16 @@ export function recordKey(providerId: string, sourceSessionId: string): string {
   return `${providerId}:${sourceSessionId}`
 }
 
+/** One write queue per ledger file, shared by every store instance. */
+const writeTails = new Map<string, Promise<unknown>>()
+
+async function serialized<T>(file: string, task: () => Promise<T>): Promise<T> {
+  const previous = writeTails.get(file) ?? Promise.resolve()
+  const run = previous.then(task, task)
+  writeTails.set(file, run.then(() => undefined, () => undefined))
+  return run
+}
+
 export class ImportStateStore {
   readonly #file: string
 
@@ -54,24 +64,29 @@ export class ImportStateStore {
 
   async save(records: Record<string, ImportRecord>): Promise<void> {
     await mkdir(dirname(this.#file), { recursive: true })
-    const temp = `${this.#file}.tmp`
+    // Concurrent imports must not share a temp name, or their renames race.
+    const temp = `${this.#file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     await writeFile(temp, JSON.stringify(records, null, 2), 'utf8')
     await rename(temp, this.#file)
   }
 
   async upsert(record: ImportRecord): Promise<void> {
-    const records = await this.load()
-    records[recordKey(record.providerId, record.sourceSessionId)] = record
-    await this.save(records)
+    await serialized(this.#file, async () => {
+      const records = await this.load()
+      records[recordKey(record.providerId, record.sourceSessionId)] = record
+      await this.save(records)
+    })
   }
 
   async remove(providerId: string, sourceSessionId: string): Promise<ImportRecord | undefined> {
-    const records = await this.load()
-    const key = recordKey(providerId, sourceSessionId)
-    const found = records[key]
-    if (found === undefined) return undefined
-    delete records[key]
-    await this.save(records)
-    return found
+    return serialized(this.#file, async () => {
+      const records = await this.load()
+      const key = recordKey(providerId, sourceSessionId)
+      const found = records[key]
+      if (found === undefined) return undefined
+      delete records[key]
+      await this.save(records)
+      return found
+    })
   }
 }

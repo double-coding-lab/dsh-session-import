@@ -2,15 +2,24 @@
  * Host-side service layer: provider discovery, session scanning, and the real
  * import run against DSH's own persistence.
  */
-import { open, readdir, rm, stat } from 'node:fs/promises'
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
-import type { ImportOptions, ImportRecord, ImportResult, ParsedSession, ProviderDescriptor } from '../shared/types.ts'
+import type {
+  DshImageRef,
+  ImportOptions,
+  ImportRecord,
+  ImportResult,
+  ParsedSession,
+  ProviderDescriptor,
+  SourceImage,
+} from '../shared/types.ts'
 import {
   importSession,
   sessionTitleEvent,
   type DshEvent,
+  type ImageResolverPort,
   type PersistencePort,
   type ProjectionCachePort,
   type SessionHeaderLike,
@@ -33,6 +42,76 @@ export interface WorkspacePort {
 /** Expand a `~`-prefixed path against the current user's home. */
 export function expandHome(path: string): string {
   return path.startsWith('~') ? join(homedir(), path.slice(1)) : path
+}
+
+/** Bounded fan-out for per-file hint reads; keeps the picker warm-up short. */
+const SCAN_CONCURRENCY = 16
+
+/**
+ * Per-file hint cache. A transcript's title/cwd only changes when the file
+ * changes, so a stat match reuses the previous read; a cold scan after a DSH
+ * restart then costs one stat per file instead of reading every head again.
+ */
+interface HintCacheEntry {
+  bytes: number
+  mtimeMs: number
+  title?: string
+  cwd?: string
+}
+
+interface HintCache {
+  version: 1
+  entries: Record<string, HintCacheEntry>
+}
+
+let hintCache: HintCache | undefined
+let hintCacheWrite: Promise<unknown> = Promise.resolve()
+
+function hintCacheFile(): string {
+  return join(dshHome(), 'session-import', 'scan-cache.json')
+}
+
+async function loadHintCache(): Promise<HintCache> {
+  if (hintCache !== undefined) return hintCache
+  try {
+    const raw = JSON.parse(await readFile(hintCacheFile(), 'utf8')) as Partial<HintCache>
+    if (raw.version === 1 && raw.entries !== null && typeof raw.entries === 'object') {
+      hintCache = raw as HintCache
+      return hintCache
+    }
+  } catch {
+    // First run or an unreadable cache: start empty.
+  }
+  hintCache = { version: 1, entries: {} }
+  return hintCache
+}
+
+function persistHintCache(): void {
+  const snapshot = hintCache
+  if (snapshot === undefined) return
+  hintCacheWrite = hintCacheWrite.then(async () => {
+    try {
+      await mkdir(join(dshHome(), 'session-import'), { recursive: true })
+      const file = hintCacheFile()
+      const temp = `${file}.tmp-${process.pid}-${Date.now()}`
+      await writeFile(temp, JSON.stringify(snapshot), 'utf8')
+      await rename(temp, file)
+    } catch (cause) {
+      console.warn('[dsh-session-import] 扫描缓存写入失败', cause)
+    }
+  })
+}
+
+async function forEachConcurrent<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const index = next++
+      if (index >= items.length) return
+      await task(items[index])
+    }
+  })
+  await Promise.all(workers)
 }
 
 /** Roots declared for the current platform. */
@@ -71,13 +150,19 @@ export async function scanProvider(
   const glob = provider.assets.sessions?.layout.sessionGlob ?? '*/*.jsonl'
   const depth = glob.split('/').length - 1
   const out: ScannedSession[] = []
+  const roots = rootsFor(provider)
+  const cache = await loadHintCache()
+  const seen = new Set<string>()
+  let cacheDirty = false
+  let enumerationComplete = true
 
-  for (const root of rootsFor(provider)) {
+  for (const root of roots) {
     let dirs: string[]
     try {
       const entries = await readdir(root, { withFileTypes: true })
       dirs = entries.filter(entry => entry.isDirectory()).map(entry => join(root, entry.name))
     } catch {
+      enumerationComplete = false
       continue
     }
     for (const dir of dirs) {
@@ -93,9 +178,10 @@ export async function scanProvider(
         const entries = await readdir(dir, { withFileTypes: true })
         files = entries.filter(entry => entry.isFile() && entry.name.endsWith('.jsonl')).map(entry => join(dir, entry.name))
       } catch {
+        enumerationComplete = false
         continue
       }
-      for (const file of files) {
+      await forEachConcurrent(files, SCAN_CONCURRENCY, async file => {
         try {
           const info = await stat(file)
           const snapshot = { bytes: info.size, mtimeMs: info.mtimeMs }
@@ -109,7 +195,24 @@ export async function scanProvider(
                 : record.fingerprint.bytes === snapshot.bytes && record.fingerprint.mtimeMs === snapshot.mtimeMs
                   ? 'imported'
                   : 'grown'
-          const hint = await readSessionHint(file)
+          seen.add(file)
+          const cached = cache.entries[file]
+          let hint: { title?: string; cwd?: string }
+          if (cached !== undefined && cached.bytes === snapshot.bytes && cached.mtimeMs === snapshot.mtimeMs) {
+            hint = {
+              ...(cached.title === undefined ? {} : { title: cached.title }),
+              ...(cached.cwd === undefined ? {} : { cwd: cached.cwd }),
+            }
+          } else {
+            hint = await readSessionHint(file)
+            cache.entries[file] = { bytes: snapshot.bytes, mtimeMs: snapshot.mtimeMs, ...hint }
+            cacheDirty = true
+          }
+          const ignored = provider.assets.sessions?.ignore?.titlePrefixes?.some(
+            prefix => hint.title?.startsWith(prefix) === true,
+          )
+          // Keep already-imported records visible so their retract entry survives.
+          if (ignored === true && record === undefined) return
           out.push({
             providerId: provider.id,
             sourcePath: file,
@@ -126,9 +229,19 @@ export async function scanProvider(
         } catch {
           // ignore unreadable entries
         }
-      }
+      })
     }
   }
+
+  if (enumerationComplete) {
+    for (const key of Object.keys(cache.entries)) {
+      if (seen.has(key)) continue
+      if (!roots.some(root => key.startsWith(root))) continue
+      delete cache.entries[key]
+      cacheDirty = true
+    }
+  }
+  if (cacheDirty) persistHintCache()
 
   return out.sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
@@ -140,7 +253,7 @@ export async function scanProvider(
  * 60 MB transcript does not slow the list down.
  */
 export async function readSessionHint(file: string): Promise<{ title?: string; cwd?: string }> {
-  const HEAD_BYTES = 512 * 1024
+  const HEAD_BYTES = 256 * 1024
   let text = ''
   try {
     const handle = await open(file, 'r')
@@ -427,6 +540,90 @@ export interface ImportRequest {
   provider?: ProviderDescriptor
 }
 
+type ImageMedia = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
+
+/** DSH attachment service slice the importer needs. */
+export interface AttachmentsFace {
+  saveImages(inputs: readonly { data: Uint8Array; mediaType: ImageMedia; name?: string }[]): Promise<readonly DshImageRef[]>
+}
+
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
+function sniffImageType(bytes: Uint8Array): ImageMedia | undefined {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return 'image/webp'
+  if (bytes.length >= 4 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return 'image/gif'
+  return undefined
+}
+
+async function readImageFile(path: string): Promise<{ data: Uint8Array; mediaType: ImageMedia; name?: string } | undefined> {
+  try {
+    const info = await stat(path)
+    if (!info.isFile() || info.size <= 0 || info.size > MAX_IMAGE_BYTES) return undefined
+    const data = new Uint8Array(await readFile(path))
+    const mediaType = sniffImageType(data)
+    return mediaType === undefined ? undefined : { data, mediaType, name: basename(path) }
+  } catch {
+    return undefined
+  }
+}
+
+async function fetchImageUrl(url: string): Promise<{ data: Uint8Array; mediaType: ImageMedia } | undefined> {
+  try {
+    let data: Uint8Array
+    let declared: string | undefined
+    if (url.startsWith('data:')) {
+      const match = /^data:([^;,]+);base64,(.*)$/s.exec(url)
+      if (match === null) return undefined
+      data = new Uint8Array(Buffer.from(match[2], 'base64'))
+      declared = match[1]
+    } else {
+      const response = await fetch(url, { signal: AbortSignal.timeout(20_000) })
+      if (!response.ok) return undefined
+      data = new Uint8Array(await response.arrayBuffer())
+      declared = response.headers.get('content-type') ?? undefined
+    }
+    if (data.byteLength <= 0 || data.byteLength > MAX_IMAGE_BYTES) return undefined
+    const mediaType =
+      sniffImageType(data) ??
+      (declared === 'image/png' || declared === 'image/jpeg' || declared === 'image/webp' || declared === 'image/gif'
+        ? declared
+        : undefined)
+    return mediaType === undefined ? undefined : { data, mediaType }
+  } catch {
+    return undefined
+  }
+}
+
+/** Local copies first (durable); the signed provider URL only while valid. */
+function createImageResolver(attachments: AttachmentsFace): ImageResolverPort {
+  return {
+    async resolve(images) {
+      const loaded = await Promise.all(
+        images.map(async image => {
+          const local = image.localPath === undefined ? undefined : await readImageFile(image.localPath)
+          return local ?? (image.url === undefined ? undefined : await fetchImageUrl(image.url))
+        }),
+      )
+      const inputs = loaded.filter(
+        (image): image is { data: Uint8Array; mediaType: ImageMedia; name?: string } => image !== undefined,
+      )
+      if (inputs.length === 0) return []
+      try {
+        return await attachments.saveImages(inputs)
+      } catch (cause) {
+        console.warn('[dsh-session-import] 图片附件保存失败', cause)
+        return []
+      }
+    },
+  }
+}
+
 /**
  * Run one real import. `persistence` is DSH's own service, so the resulting
  * session is a first-class session: it appears in the sidebar and can be
@@ -437,6 +634,9 @@ export async function runImport(
   request: ImportRequest,
   workspace?: WorkspacePort,
   projections?: ProjectionCachePort,
+  attachments?: AttachmentsFace,
+  liveStatus?: (sessionId: string) => string | undefined,
+  evictLive?: (sessionId: string) => Promise<void>,
 ): Promise<ImportResult> {
   const parsed = await parseClaudeJsonl(request.sourcePath, {
     providerId: request.providerId,
@@ -450,7 +650,17 @@ export async function runImport(
     )
   }
   const state = new ImportStateStore(join(dshHome(), 'session-import', 'state.json'))
-  const result = await importSession({ persistence, state }, session, request.options)
+  const result = await importSession(
+    {
+      persistence,
+      state,
+      ...(attachments === undefined ? {} : { images: createImageResolver(attachments) }),
+      ...(liveStatus === undefined ? {} : { liveStatus }),
+      ...(evictLive === undefined ? {} : { evictLive }),
+    },
+    session,
+    request.options,
+  )
 
   if (result.status === 'imported' || result.status === 'appended') {
     if (projections !== undefined) {

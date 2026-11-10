@@ -10,7 +10,15 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 
-import type { ImportOptions, ImportRecord, ImportResult, ParsedSession } from '../shared/types.ts'
+import type {
+  DshImageRef,
+  ImportOptions,
+  ImportRecord,
+  ImportResult,
+  ParsedSession,
+  SourceEvent,
+  SourceImage,
+} from '../shared/types.ts'
 import { mapToDshEvents, type DshEvent } from './mapper.ts'
 import { fingerprintOf, recordKey, sameFingerprint, type ImportStateStore, type SourceFingerprint } from './state.ts'
 
@@ -70,10 +78,88 @@ export interface PersistencePort {
   stat?(id: string): Promise<{ header: SessionHeaderLike } | undefined>
 }
 
+/** Host-side port: durably store source images and return DSH attachment refs. */
+export interface ImageResolverPort {
+  resolve(images: readonly SourceImage[]): Promise<readonly DshImageRef[]>
+}
+
 export interface ImportDeps {
   persistence: PersistencePort
   state: ImportStateStore
+  images?: ImageResolverPort
+  /** Live session lookup; a resident session owns the log's write handle. */
+  liveStatus?: (sessionId: string) => string | undefined
+  /** Tear down a resident session so the append can take the write handle. */
+  evictLive?: (sessionId: string) => Promise<void>
   now?: () => number
+}
+
+/**
+ * Attachment lists that only repeat the paths of images which became native
+ * blocks are noise once the images render above the text.
+ */
+function stripImportedImageLines(text: string, importedPaths: readonly string[]): string {
+  if (importedPaths.length === 0) return text
+  const wanted = new Set(importedPaths)
+  const kept: string[] = []
+  let removed = 0
+  for (const line of text.split('\n')) {
+    const match = /^-\s*文件：(.+)$/.exec(line.trim())
+    if (match !== null && wanted.has(match[1].trim())) {
+      removed += 1
+      continue
+    }
+    kept.push(line)
+  }
+  if (removed === 0) return text
+  const out: string[] = []
+  for (let index = 0; index < kept.length; index += 1) {
+    const line = kept[index]
+    if (line.trim() === '附件引用：') {
+      let hasFileLine = false
+      for (let next = index + 1; next < kept.length; next += 1) {
+        const value = kept[next].trim()
+        if (value === '') continue
+        hasFileLine = value.startsWith('- 文件：')
+        break
+      }
+      if (!hasFileLine) continue
+    }
+    out.push(line)
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+}
+
+/** Attach durable image refs before mapping; unresolvable images are dropped. */
+async function resolveEventImages(
+  events: readonly SourceEvent[],
+  images: ImageResolverPort | undefined,
+): Promise<SourceEvent[]> {
+  if (images === undefined) return [...events]
+  const out: SourceEvent[] = []
+  for (const event of events) {
+    if (event.kind !== 'user' || (event.images?.length ?? 0) === 0) {
+      out.push(event)
+      continue
+    }
+    let refs: readonly DshImageRef[] = []
+    try {
+      refs = await images.resolve(event.images ?? [])
+    } catch (cause) {
+      console.warn('[dsh-session-import] 图片解析失败', cause)
+    }
+    const allImported = refs.length === (event.images?.length ?? 0)
+    const localPaths = (event.images ?? [])
+      .map(image => image.localPath)
+      .filter((path): path is string => path !== undefined && path !== '')
+    out.push({
+      kind: 'user',
+      time: event.time,
+      text: allImported ? stripImportedImageLines(event.text, localPaths) : event.text,
+      ...(refs.length > 0 ? { imageRefs: [...refs] } : {}),
+    })
+  }
+  return out
 }
 
 /** Session ids are namespaced so two providers cannot collide. */
@@ -93,13 +179,16 @@ export function sessionTitleEvent(title: string | undefined, events: readonly Ds
   const text = title.replace(/[\u0000-\u001f\u007f\u009b]/g, ' ').replace(/\s+/g, ' ').trim()
   if (text === '') return undefined
   const firstUser = events.find(event => event.type === 'user/message')
+  // DSH only accepts empty messageSeqs for user-set titles; a fallback title
+  // must cite an earlier human message, so tool-only sessions get no title.
+  if (firstUser === undefined) return undefined
   return {
     type: TITLE_EVENT_TYPE,
     seq: events.length,
     time: events.at(-1)?.time ?? Date.now(),
     data: {
       title: text.slice(0, 60),
-      messageSeqs: firstUser === undefined ? [] : [firstUser.seq],
+      messageSeqs: [firstUser.seq],
       source: { kind: 'fallback' },
     },
   }
@@ -136,6 +225,16 @@ export function prefixHashOf(events: readonly DshEvent[], count = 64): string {
     .slice(0, 16)
 }
 
+/** Hash of the mapped events just before the append cursor (middle-of-log anchor). */
+export function boundaryHashOf(events: readonly DshEvent[], cursor: number, count = 32): string {
+  const end = Math.max(0, Math.min(cursor, events.length))
+  const slice = events.slice(Math.max(0, end - count), end)
+  return createHash('sha256')
+    .update(JSON.stringify(slice.map(event => [event.type, event.seq, event.data])))
+    .digest('hex')
+    .slice(0, 16)
+}
+
 export async function importSession(
   deps: ImportDeps,
   parsed: ParsedSession,
@@ -163,7 +262,7 @@ export async function importSession(
     }
   }
 
-  const mapped = mapToDshEvents(parsed.events, options)
+  const mapped = mapToDshEvents(await resolveEventImages(parsed.events, deps.images), options)
   if (mapped.events.length === 0) {
     return {
       status: 'failed',
@@ -184,21 +283,76 @@ export async function importSession(
   // window that slid (compaction, truncation) changes the prefix, which makes
   // appending unsafe — refuse instead of corrupting the log.
   if (existing !== undefined) {
+    // DSH keeps one writer per session; an opened session owns the handle until
+    // its agent/session is unregistered. Tear an idle one down like retract does.
+    const live = deps.liveStatus?.(existing.dshSessionId)
+    if (live !== undefined) {
+      let released = false
+      if (live !== 'running' && deps.evictLive !== undefined) {
+        try {
+          await deps.evictLive(existing.dshSessionId)
+          released = true
+        } catch (cause) {
+          console.warn('[dsh-session-import] 释放会话占用失败', cause)
+        }
+      }
+      if (!released) {
+        await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+        return {
+          status: 'failed',
+          providerId: parsed.providerId,
+          sourceSessionId: parsed.sourceSessionId,
+          dshSessionId: existing.dshSessionId,
+          turns: 0,
+          events: 0,
+          truncated: mapped.truncated,
+          repaired: mapped.repairedCalls,
+          message: live === 'running'
+            ? '该会话正在生成回复，请等本轮结束后再导入'
+            : '该会话在 DSH 中打开且无法释放写入占用；请重启 DSH 后再试，或撤回后重新导入',
+        }
+      }
+    }
     let previous = existing.importedEventCount
     let previousHash = existing.prefixHash
     let cursor = 0
+    let storedMaxTurn = 0
+    let storedOpenTurn = false
     const probe = await deps.persistence.open(existing.dshSessionId, 'read')
+    let storedLogUnreadable = false
     try {
       const page = await probe.read()
       cursor = page.events.length
+      for (const event of page.events) {
+        const turn = (event.data as { turn?: unknown } | undefined)?.turn
+        if (typeof turn === 'number' && turn > storedMaxTurn) storedMaxTurn = turn
+        if (event.type === 'turn/start') storedOpenTurn = true
+        if (event.type === 'turn/end') storedOpenTurn = false
+      }
       // Legacy records predate the append cursor; recover it from the stored log.
       if (previous === undefined || previousHash === undefined) {
         const storedMapped = page.events.filter(event => event.type !== TITLE_EVENT_TYPE)
         previous = storedMapped.length
         previousHash = prefixHashOf(storedMapped, Math.min(64, previous))
       }
+    } catch {
+      storedLogUnreadable = true
     } finally {
       await probe.close()
+    }
+    if (storedLogUnreadable) {
+      await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+      return {
+        status: 'failed',
+        providerId: parsed.providerId,
+        sourceSessionId: parsed.sourceSessionId,
+        dshSessionId: existing.dshSessionId,
+        turns: 0,
+        events: 0,
+        truncated: mapped.truncated,
+        repaired: mapped.repairedCalls,
+        message: '现有 DSH 会话日志已损坏，无法增量导入；请先撤回再重新导入（撤回会删除该会话，包括在 DSH 中续聊的内容）',
+      }
     }
     const hash = prefixHashOf(mapped.events, Math.min(64, previous))
     if (previousHash !== hash) {
@@ -231,7 +385,56 @@ export async function importSession(
       }
     }
 
-    const tail = mapped.events.slice(previous).map((event, index) => ({ ...event, seq: cursor + index }))
+    // Appending must start on a turn boundary whose numbers continue the log.
+    // The session may have been continued inside DSH (runtime turns consume
+    // numbers), and a parser upgrade can shift the cursor; neither may desync
+    // turn numbers or the log is rejected as corrupt on load.
+    const tailRaw = mapped.events.slice(previous)
+    const firstStart = tailRaw.find(event => event.type === 'turn/start')
+    const firstTurn = firstStart === undefined ? undefined : (firstStart.data as { turn?: unknown }).turn
+    if (tailRaw[0]?.type !== 'turn/start' || typeof firstTurn !== 'number') {
+      await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+      return {
+        status: 'failed',
+        providerId: parsed.providerId,
+        sourceSessionId: parsed.sourceSessionId,
+        dshSessionId: existing.dshSessionId,
+        turns: 0,
+        events: 0,
+        truncated: mapped.truncated,
+        repaired: mapped.repairedCalls,
+        message: '新增内容不是从回合开头开始，无法安全追加；请先撤回再重新导入',
+      }
+    }
+    const boundaryOk =
+      existing.boundaryHash !== undefined &&
+      previous !== undefined &&
+      boundaryHashOf(mapped.events, previous) === existing.boundaryHash
+    const offset = storedMaxTurn + 1 - firstTurn
+    if (storedOpenTurn || offset < 0 || (offset > 0 && !boundaryOk)) {
+      await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+      return {
+        status: 'failed',
+        providerId: parsed.providerId,
+        sourceSessionId: parsed.sourceSessionId,
+        dshSessionId: existing.dshSessionId,
+        turns: 0,
+        events: 0,
+        truncated: mapped.truncated,
+        repaired: mapped.repairedCalls,
+        message: storedOpenTurn
+          ? '该会话有未结束的回合，暂不能追加；请先撤回再重新导入'
+          : '会话已在 DSH 中继续过或解析规则已升级，无法安全追加；请先撤回再重新导入',
+      }
+    }
+    const tail = tailRaw.map((event, index) => {
+      const data = event.data as Record<string, unknown>
+      const shifted =
+        offset === 0 || typeof data['turn'] !== 'number'
+          ? event
+          : { ...event, data: { ...data, turn: data['turn'] + offset } }
+      return { ...shifted, seq: cursor + index }
+    })
     const writeHandle = await deps.persistence.open(existing.dshSessionId, 'write')
     try {
       await writeHandle.append(tail)
@@ -246,6 +449,7 @@ export async function importSession(
       importedTurns: mapped.turns,
       importedEventCount: previous + tail.length,
       prefixHash: prefixHashOf(mapped.events, Math.min(64, previous + tail.length)),
+      boundaryHash: boundaryHashOf(mapped.events, mapped.events.length),
       lastImportAt: now(),
       status: 'ok',
     })
@@ -317,6 +521,7 @@ export async function importSession(
     importedTurns: mapped.turns,
     importedEventCount: rebased.length,
     prefixHash: prefixHashOf(rebased, Math.min(64, rebased.length)),
+    boundaryHash: boundaryHashOf(rebased, rebased.length),
     importedAt: now(),
     lastImportAt: now(),
     status: 'ok',

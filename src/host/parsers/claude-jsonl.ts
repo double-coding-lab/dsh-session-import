@@ -10,7 +10,7 @@ import { createReadStream } from 'node:fs'
 import { basename } from 'node:path'
 import { createInterface } from 'node:readline'
 
-import type { ParseStats, ParsedSession, SourceEvent } from '../../shared/types.ts'
+import type { ParseStats, ParsedSession, SourceEvent, SourceImage } from '../../shared/types.ts'
 
 /** Loose shape of one transcript record; fields are read defensively. */
 interface RawRecord {
@@ -359,6 +359,9 @@ export async function parseClaudeJsonl(
       stats.sidechainRecords += 1
       continue
     }
+    // Source tools inject synthetic annotations (e.g. "[Image: original 4096x3072…]")
+    // as isMeta user records; they are not part of the conversation.
+    if (record.isMeta === true) continue
 
     const time = toTime(record.timestamp) ?? endedAt ?? Date.now()
     const content = record.message?.content
@@ -366,9 +369,17 @@ export async function parseClaudeJsonl(
     if (record.type === 'user') {
       const blocks = Array.isArray(content) ? content : [{ type: 'text', text: blockText(content) }]
       const texts: string[] = []
+      const images: SourceImage[] = []
       for (const raw of blocks) {
         if (!raw || typeof raw !== 'object') continue
-        const block = raw as { type?: string; text?: unknown; tool_use_id?: unknown; content?: unknown; is_error?: unknown }
+        const block = raw as {
+          type?: string
+          text?: unknown
+          tool_use_id?: unknown
+          content?: unknown
+          is_error?: unknown
+          source?: { type?: string; url?: unknown; media_type?: unknown; data?: unknown }
+        }
         stats.blocks[block.type ?? 'unknown'] = (stats.blocks[block.type ?? 'unknown'] ?? 0) + 1
         if (block.type === 'tool_result') {
           push({
@@ -381,10 +392,27 @@ export async function parseClaudeJsonl(
         } else if (block.type === 'text' || block.type === undefined) {
           const text = blockText(block.text)
           if (text !== '') texts.push(text)
+        } else if (block.type === 'image') {
+          const source = block.source
+          if (source?.type === 'url' && typeof source.url === 'string') images.push({ url: source.url })
+          else if (source?.type === 'base64' && typeof source.data === 'string') {
+            const mediaType = typeof source.media_type === 'string' ? source.media_type : 'image/png'
+            images.push({ url: `data:${mediaType};base64,${source.data}` })
+          }
         }
       }
-      if (texts.length > 0) {
-        const joined = texts.join('\n\n')
+      const joined = texts.join('\n\n')
+      if (joined !== '' || images.length > 0) {
+        // The attachment list quotes the local copies in the same order as the
+        // image blocks, so a positional pairing recovers durable files even
+        // after the provider's signed URL expires.
+        const listed = [...joined.matchAll(/^-\s*文件：(.+)$/gm)]
+          .map(match => match[1].trim())
+          .filter(path => /\.(png|jpe?g|webp|gif)$/i.test(path))
+        images.forEach((image, index) => {
+          const local = listed[index]
+          if (local !== undefined && local !== '') image.localPath = local
+        })
         const continuation = joined.startsWith('This session is being continued')
         // The source tool injects skill bodies as user messages. Keeping them
         // imports whole skill documents as if the human had typed them, which
@@ -392,12 +420,12 @@ export async function parseClaudeJsonl(
         // are tool context too, but they mark a new context segment: close the
         // previous turn here so a resumed session's idle gap is not reported
         // as work time in the turn footer.
-        if (SKILL_INJECTION_PREFIXES.some(prefix => joined.startsWith(prefix)) || isSyntheticUserText(joined)) {
+        if (joined !== '' && (SKILL_INJECTION_PREFIXES.some(prefix => joined.startsWith(prefix)) || isSyntheticUserText(joined))) {
           if (continuation) push({ kind: 'turn-boundary', time })
           injectedUserMessages += 1
         } else {
           push({ kind: 'turn-boundary', time })
-          push({ kind: 'user', time, text: joined })
+          push({ kind: 'user', time, text: joined, ...(images.length > 0 ? { images } : {}) })
         }
       }
     } else if (record.type === 'assistant') {

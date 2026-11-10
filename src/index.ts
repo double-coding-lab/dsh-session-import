@@ -13,10 +13,10 @@ import { fileURLToPath } from 'node:url'
 
 import type { Context } from '@deepseek-ai/cordis'
 
-import type { ImportOptions, ProviderDescriptor } from './shared/types.ts'
+import type { ImportOptions, ImportResult, ProviderDescriptor } from './shared/types.ts'
 import { DEFAULT_IMPORT_OPTIONS } from './shared/types.ts'
 import type { PersistencePort, ProjectionCachePort, SessionHandle, SessionHeaderLike } from './host/importer.ts'
-import type { RetractRuntime, WorkspacePort } from './host/service.ts'
+import type { AttachmentsFace, RetractRuntime, WorkspacePort } from './host/service.ts'
 import {
   backfillTitles,
   dshHome,
@@ -36,6 +36,45 @@ export const inject = ['webServer']
 
 /** Route prefix; the panel calls `<prefix>/api/*`. */
 export const ROUTE_PREFIX = '/dsh-session-import'
+
+interface ImportBatchTarget {
+  providerId: string
+  sourcePath: string
+  providerName?: string
+  title?: string
+  cwd?: string
+  bytes?: number
+  mtimeMs?: number
+  previousStatus?: string
+}
+
+interface ImportJobEntry extends ImportResult {
+  providerName: string
+  title?: string
+  sourcePath: string
+  cwd?: string
+  sourceBytes?: number
+  sourceMtime?: string
+  previousStatus?: string
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+}
+
+interface ImportJobState {
+  startedAt: string
+  finishedAt?: string
+  total: number
+  done: number
+  running: boolean
+  results: ImportJobEntry[]
+}
+
+/**
+ * Batch imports run in the host, not in the panel: closing the settings page
+ * must not stop the queue. The panel polls this state to show progress.
+ */
+let importJob: ImportJobState | undefined
 
 /** Load every `providers/<id>/provider.json` shipped with the package. */
 interface LoadedProvider {
@@ -93,6 +132,7 @@ interface RouteFace {
 
 /** Narrow slice of DSH's live `workspaceRegistry` service. */
 interface WorkspaceEntityFace {
+  id: string
   path: string
   sessionIds: string[]
   attachSession(sessionId: string): Promise<void>
@@ -103,6 +143,7 @@ interface WorkspaceRegistryFace {
   create(path: string, title: string): Promise<WorkspaceEntityFace>
   resolveByPath(path: string): Promise<WorkspaceEntityFace | undefined>
   list(): WorkspaceEntityFace[]
+  delete?(id: string): Promise<boolean>
 }
 
 /** Narrow slice of the live agent registry; agents live for the host process. */
@@ -181,6 +222,8 @@ export function apply(ctx: Context): () => void {
     | undefined
   const projectionCache = (): ProjectionCachePort | undefined =>
     loose.get?.('sessionProjectionCache') as ProjectionCachePort | undefined
+  const attachments = (): AttachmentsFace | undefined =>
+    loose.get?.('attachments') as AttachmentsFace | undefined
 
   // DSH hands out per-session handles; the importer only needs this narrow slice.
   const persistence: PersistencePort | undefined =
@@ -236,7 +279,15 @@ export function apply(ctx: Context): () => void {
         try {
           for (const entity of registry.list()) {
             if (Array.isArray(entity.sessionIds) && entity.sessionIds.includes(sessionId)) {
+              const wasOnly = entity.sessionIds.length === 1
               await entity.detachSession(sessionId)
+              if (wasOnly && typeof registry.delete === 'function') {
+                try {
+                  await registry.delete(entity.id)
+                } catch (cause) {
+                  console.warn('[dsh-session-import] 空工作区清理失败', cause)
+                }
+              }
               return true
             }
           }
@@ -364,12 +415,135 @@ export function apply(ctx: Context): () => void {
             sourcePath,
             options: importOptionsFrom(body),
             provider,
-          }, workspace, projectionCache())
+          }, workspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict)
           sendJson(res, 200, { ok: result.status !== 'failed', result })
           return
         }
 
+        if (path === `${ROUTE_PREFIX}/api/import-batch` && req.method === 'POST') {
+          if (persistence === undefined) {
+            sendJson(res, 503, { ok: false, error: 'sessionPersistence 不可用' })
+            return
+          }
+          if (importJob?.running === true) {
+            sendJson(res, 409, { ok: false, error: '已有导入任务进行中' })
+            return
+          }
+          const body = await readJson(req)
+          const rawTargets = Array.isArray(body.targets) ? body.targets : []
+          const targets: ImportBatchTarget[] = []
+          for (const raw of rawTargets) {
+            if (raw === null || typeof raw !== 'object') continue
+            const item = raw as Record<string, unknown>
+            if (typeof item['providerId'] !== 'string' || item['providerId'] === '') continue
+            if (typeof item['sourcePath'] !== 'string' || item['sourcePath'] === '') continue
+            targets.push({
+              providerId: item['providerId'],
+              sourcePath: item['sourcePath'],
+              ...(typeof item['providerName'] === 'string' ? { providerName: item['providerName'] } : {}),
+              ...(typeof item['title'] === 'string' ? { title: item['title'] } : {}),
+              ...(typeof item['cwd'] === 'string' ? { cwd: item['cwd'] } : {}),
+              ...(typeof item['bytes'] === 'number' ? { bytes: item['bytes'] } : {}),
+              ...(typeof item['mtimeMs'] === 'number' ? { mtimeMs: item['mtimeMs'] } : {}),
+              ...(typeof item['previousStatus'] === 'string' ? { previousStatus: item['previousStatus'] } : {}),
+            })
+          }
+          if (targets.length === 0) {
+            sendJson(res, 400, { ok: false, error: 'targets 必填' })
+            return
+          }
+          const options = importOptionsFrom(body)
+          const job: ImportJobState = {
+            startedAt: new Date().toISOString(),
+            total: targets.length,
+            done: 0,
+            running: true,
+            results: [],
+          }
+          importJob = job
+          const JOB_CONCURRENCY = 3
+          // The workspace registry mutates one entity per attach, so attach is
+          // serialized while the heavier per-session work overlaps.
+          const attachTail = { current: Promise.resolve() as Promise<unknown> }
+          const serializedWorkspace: WorkspacePort | undefined = workspace === undefined
+            ? undefined
+            : {
+                attach: (sessionId, cwd) => {
+                  const run = attachTail.current.then(() => workspace.attach(sessionId, cwd))
+                  attachTail.current = run.then(() => undefined, () => undefined)
+                  return run
+                },
+                detach: sessionId => workspace.detach(sessionId),
+              }
+          const runOne = async (target: ImportBatchTarget): Promise<void> => {
+            const provider = loadProviders().find(item => item.id === target.providerId)
+            const startedAt = new Date().toISOString()
+            const attemptStarted = Date.now()
+            let result: ImportResult
+            try {
+              result = await runImport(persistence, {
+                providerId: target.providerId,
+                sourcePath: target.sourcePath,
+                options,
+                provider,
+              }, serializedWorkspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict)
+            } catch (cause) {
+              result = {
+                status: 'failed',
+                providerId: target.providerId,
+                sourceSessionId: '',
+                turns: 0,
+                events: 0,
+                truncated: 0,
+                repaired: 0,
+                message: cause instanceof Error ? cause.message : String(cause),
+              }
+            }
+            job.results.push({
+              ...result,
+              providerName: target.providerName ?? provider?.name ?? target.providerId,
+              ...(target.title === undefined ? {} : { title: target.title }),
+              sourcePath: target.sourcePath,
+              ...(target.cwd === undefined ? {} : { cwd: target.cwd }),
+              ...(target.bytes === undefined ? {} : { sourceBytes: target.bytes }),
+              ...(target.mtimeMs === undefined ? {} : { sourceMtime: new Date(target.mtimeMs).toISOString() }),
+              ...(target.previousStatus === undefined ? {} : { previousStatus: target.previousStatus }),
+              startedAt,
+              finishedAt: new Date().toISOString(),
+              durationMs: Date.now() - attemptStarted,
+            })
+            job.done += 1
+          }
+          void (async () => {
+            try {
+              let next = 0
+              const workers = Array.from({ length: Math.min(JOB_CONCURRENCY, targets.length) }, async () => {
+                while (true) {
+                  const index = next++
+                  if (index >= targets.length) return
+                  await runOne(targets[index])
+                }
+              })
+              await Promise.all(workers)
+            } finally {
+              job.running = false
+              job.finishedAt = new Date().toISOString()
+            }
+          })()
+          sendJson(res, 200, { ok: true, startedAt: job.startedAt, total: job.total })
+          return
+        }
+
+        if (path === `${ROUTE_PREFIX}/api/import-status`) {
+          sendJson(res, 200, { ok: true, job: importJob ?? null })
+          return
+        }
+
         if (path === `${ROUTE_PREFIX}/api/retract` && req.method === 'POST') {
+          if (importJob?.running === true) {
+            sendJson(res, 409, { ok: false, error: '导入进行中，暂不能撤回' })
+            return
+          }
           const body = await readJson(req)
           const providerId = typeof body.providerId === 'string' ? body.providerId : ''
           const sourceSessionId = typeof body.sourceSessionId === 'string' ? body.sourceSessionId : ''
