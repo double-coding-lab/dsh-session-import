@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
+import { isAbsolute, relative } from 'node:path'
 import { createInterface } from 'node:readline'
 
 import type {
@@ -17,6 +18,7 @@ import type {
   ImportResult,
   ParsedSession,
   SourceEvent,
+  SourceFileAttachment,
   SourceImage,
 } from '../shared/types.ts'
 import { mapToDshEvents, type DshEvent } from './mapper.ts'
@@ -83,10 +85,23 @@ export interface ImageResolverPort {
   resolve(images: readonly SourceImage[]): Promise<readonly DshImageRef[]>
 }
 
+/** One source file that still exists locally, plus its original text token. */
+export interface ResolvedFileAttachment {
+  localPath: string
+  /** Exact source token that represented the file, when it was inline text. */
+  mention?: string
+}
+
+/** Host-side port: keep source files that still exist so text can reference them. */
+export interface FileResolverPort {
+  resolve(files: readonly SourceFileAttachment[]): Promise<readonly ResolvedFileAttachment[]>
+}
+
 export interface ImportDeps {
   persistence: PersistencePort
   state: ImportStateStore
   images?: ImageResolverPort
+  files?: FileResolverPort
   /** Live session lookup; a resident session owns the log's write handle. */
   liveStatus?: (sessionId: string) => string | undefined
   /** Tear down a resident session so the append can take the write handle. */
@@ -97,68 +112,129 @@ export interface ImportDeps {
 }
 
 /**
- * Attachment lists that only repeat the paths of images which became native
- * blocks are noise once the images render above the text.
+ * Attachment lists that only repeat the paths of files which became inline
+ * references are noise once those references render as chips. Qoder uses
+ * `- 文件：<path>` list entries, Claude Code embeds `@"<path>"` mentions, and
+ * Codex leaves a markdown link token that the parser records as `mention`.
  */
-function stripImportedImageLines(text: string, importedPaths: readonly string[]): string {
-  if (importedPaths.length === 0) return text
+function stripImportedAttachmentLines(
+  text: string,
+  importedPaths: readonly string[],
+  importedMentions: readonly string[] = [],
+): string {
+  if (importedPaths.length === 0 && importedMentions.length === 0) return text
   const wanted = new Set(importedPaths)
+  let next = text
+  for (const mention of importedMentions) next = next.split(mention).join('')
+  if (importedMentions.length > 0) next = next.replace(/[ \t]{2,}/g, ' ')
+  for (const path of importedPaths) {
+    next = next.split(`@"${path}"`).join('')
+    next = next.split(`@'${path}'`).join('')
+  }
   const kept: string[] = []
   let removed = 0
-  for (const line of text.split('\n')) {
-    const match = /^-\s*文件：(.+)$/.exec(line.trim())
-    if (match !== null && wanted.has(match[1].trim())) {
+  for (const line of next.split('\n')) {
+    const match = /^-\s*文件[：:]\s*(.+)$/.exec(line.trim())
+    if (match !== null && wanted.has((match[1] ?? '').trim())) {
       removed += 1
       continue
     }
     kept.push(line)
   }
-  if (removed === 0) return text
+  if (removed === 0 && next === text) return text
   const out: string[] = []
   for (let index = 0; index < kept.length; index += 1) {
-    const line = kept[index]
-    if (line.trim() === '附件引用：') {
+    const line = kept[index] ?? ''
+    const header = line.trim()
+    if (header === '附件引用：' || header === '附件引用:') {
       let hasFileLine = false
-      for (let next = index + 1; next < kept.length; next += 1) {
-        const value = kept[next].trim()
+      for (let after = index + 1; after < kept.length; after += 1) {
+        const value = (kept[after] ?? '').trim()
         if (value === '') continue
-        hasFileLine = value.startsWith('- 文件：')
+        hasFileLine = /^-\s*文件[：:]/.test(value)
         break
       }
       if (!hasFileLine) continue
     }
     out.push(line)
   }
-  return out.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()
+  return out.join('\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
-/** Attach durable image refs before mapping; unresolvable images are dropped. */
-async function resolveEventImages(
+/**
+ * DSH renders `@path` tokens in user text as clickable file chips (the same
+ * grammar the composer writes). Workspace-relative paths read like a native
+ * pick; whitespace needs the quoted `@"path"` form.
+ */
+function fileMentionToken(path: string, cwd: string | undefined): string | undefined {
+  let target = path
+  if (cwd !== undefined && cwd !== '') {
+    const rel = relative(cwd, path)
+    if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) target = rel
+  }
+  if (/[\u0000-\u001f\u007f-\u009f"]/u.test(target)) return undefined
+  return /\s/u.test(target) ? `@"${target}"` : `@${target}`
+}
+
+/** Attach native file references before mapping; missing files stay in text. */
+async function resolveEventAttachments(
   events: readonly SourceEvent[],
   images: ImageResolverPort | undefined,
+  files: FileResolverPort | undefined,
+  cwd: string | undefined,
 ): Promise<SourceEvent[]> {
-  if (images === undefined) return [...events]
+  if (images === undefined && files === undefined) return [...events]
   const out: SourceEvent[] = []
   for (const event of events) {
-    if (event.kind !== 'user' || (event.images?.length ?? 0) === 0) {
+    if (event.kind !== 'user' || ((event.images?.length ?? 0) === 0 && (event.files?.length ?? 0) === 0)) {
       out.push(event)
       continue
     }
-    let refs: readonly DshImageRef[] = []
-    try {
-      refs = await images.resolve(event.images ?? [])
-    } catch (cause) {
-      console.warn('[dsh-session-import] 图片解析失败', cause)
+    let imageRefs: readonly DshImageRef[] = []
+    if ((event.images?.length ?? 0) > 0 && images !== undefined) {
+      try {
+        imageRefs = await images.resolve(event.images ?? [])
+      } catch (cause) {
+        console.warn('[dsh-session-import] 图片解析失败', cause)
+      }
     }
-    const allImported = refs.length === (event.images?.length ?? 0)
-    const localPaths = (event.images ?? [])
-      .map(image => image.localPath)
-      .filter((path): path is string => path !== undefined && path !== '')
+    let storedFiles: readonly ResolvedFileAttachment[] = []
+    if ((event.files?.length ?? 0) > 0 && files !== undefined) {
+      try {
+        storedFiles = await files.resolve(event.files ?? [])
+      } catch (cause) {
+        console.warn('[dsh-session-import] 文件解析失败', cause)
+      }
+    }
+    const allImagesImported = imageRefs.length === (event.images?.length ?? 0)
+    const imagePaths = allImagesImported
+      ? (event.images ?? [])
+          .map(image => image.localPath)
+          .filter((path): path is string => path !== undefined && path !== '')
+      : []
+    const referenced = storedFiles.flatMap(file => {
+      const token = fileMentionToken(file.localPath, cwd)
+      return token === undefined ? [] : [{ ...file, token }]
+    })
+    let text = event.text
+    for (const file of referenced) {
+      if (file.mention !== undefined && file.mention !== '') text = text.split(file.mention).join(file.token)
+    }
+    if (imagePaths.length > 0 || referenced.length > 0) {
+      text = stripImportedAttachmentLines(
+        text,
+        [...imagePaths, ...referenced.map(file => file.localPath)],
+      )
+    }
+    const appended = referenced
+      .filter(file => file.mention === undefined || file.mention === '')
+      .map(file => file.token)
+    if (appended.length > 0) text = [text, ...appended].filter(part => part !== '').join('\n')
     out.push({
       kind: 'user',
       time: event.time,
-      text: allImported ? stripImportedImageLines(event.text, localPaths) : event.text,
-      ...(refs.length > 0 ? { imageRefs: [...refs] } : {}),
+      text,
+      ...(imageRefs.length > 0 ? { imageRefs: [...imageRefs] } : {}),
     })
   }
   return out
@@ -311,7 +387,10 @@ export async function importSession(
     }
   }
 
-  const mapped = mapToDshEvents(await resolveEventImages(parsed.events, deps.images), options)
+  const mapped = mapToDshEvents(
+    await resolveEventAttachments(parsed.events, deps.images, deps.files, parsed.cwd),
+    options,
+  )
   if (mapped.events.length === 0) {
     return {
       status: 'failed',

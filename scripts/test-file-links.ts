@@ -135,6 +135,17 @@ if (!flexibleText.includes('`报告(1).md`') || !flexibleText.includes('`a b.md`
   problems.push('绝对路径、百分号编码与带括号路径未正确改写')
 }
 
+const slash = adaptFileLinks(
+  [{ kind: 'assistant', time: 0, text: 'E [win](</E:/demo/c.md>)' }],
+  [{ syntax: 'markdown-link', accept: ['absolute-path'] }],
+  undefined,
+)
+const slashFiles = slash.events[0]?.kind === 'assistant' ? (slash.events[0].files ?? []) : []
+const slashExpected = process.platform === 'win32' ? resolve('E:/demo/c.md') : resolve('/E:/demo/c.md')
+if (!slashFiles.some(file => file.path === slashExpected)) {
+  problems.push(`/E:/… 应归一化为 ${slashExpected}，实际 ${JSON.stringify(slashFiles)}`)
+}
+
 const mapped = mapToDshEvents(adapted.events, DEFAULT_IMPORT_OPTIONS)
 const presented = mapped.events.filter(event => event.type === 'deliverables/presented')
 if (presented.length !== 1) problems.push(`应产生 1 条 deliverables/presented，实际 ${presented.length}`)

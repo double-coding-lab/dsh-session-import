@@ -20,9 +20,11 @@ import {
   importSession,
   sessionTitleEvent,
   type DshEvent,
+  type FileResolverPort,
   type ImageResolverPort,
   type PersistencePort,
   type ProjectionCachePort,
+  type ResolvedFileAttachment,
   type SessionHeaderLike,
 } from './importer.ts'
 import { cleanTitleText, parseClaudeJsonl } from './parsers/claude-jsonl.ts'
@@ -953,6 +955,28 @@ function createImageResolver(attachments: AttachmentsFace): ImageResolverPort {
   }
 }
 
+/** Keep files that still exist; the message itself carries their paths. */
+export function createFileResolver(): FileResolverPort {
+  return {
+    async resolve(files) {
+      const existing = await Promise.all(files.map(async file => {
+        const info = await stat(file.localPath).catch((cause: NodeJS.ErrnoException) => {
+          if (cause.code !== 'ENOENT') {
+            console.warn(`[dsh-session-import] 文件附件读取失败：${file.localPath}`, cause)
+          }
+          return undefined
+        })
+        if (info === undefined || !info.isFile() || info.size <= 0) return undefined
+        return {
+          localPath: file.localPath,
+          ...(file.mention === undefined ? {} : { mention: file.mention }),
+        }
+      }))
+      return existing.filter((file): file is ResolvedFileAttachment => file !== undefined)
+    },
+  }
+}
+
 /**
  * Run one real import. `persistence` is DSH's own service, so the resulting
  * session is a first-class session: it appears in the sidebar and can be
@@ -1012,6 +1036,7 @@ export async function runImport(
     {
       persistence,
       state,
+      files: createFileResolver(),
       ...(attachments === undefined ? {} : { images: createImageResolver(attachments) }),
       ...(liveStatus === undefined ? {} : { liveStatus }),
       ...(evictLive === undefined ? {} : { evictLive }),

@@ -121,6 +121,16 @@ export interface SourceImage {
   url?: string
 }
 
+/** A local file the source tool attached to a user message. */
+export interface SourceFileAttachment {
+  /** Absolute source path; bytes are copied into DSH's attachment store. */
+  localPath: string
+  /** Display name override; the leaf name is used when absent. */
+  name?: string
+  /** Exact source-text token (e.g. a markdown link); removed after storage. */
+  mention?: string
+}
+
 /** Durable DSH image reference embedded in a stored message block. */
 export interface DshImageRef {
   attachmentId: string
@@ -133,7 +143,14 @@ export interface DshImageRef {
 
 /** A normalized conversation event, independent of any tool's format. */
 export type SourceEvent =
-  | { kind: 'user'; time: number; text: string; images?: SourceImage[]; imageRefs?: DshImageRef[] }
+  | {
+    kind: 'user'
+    time: number
+    text: string
+    images?: SourceImage[]
+    files?: SourceFileAttachment[]
+    imageRefs?: DshImageRef[]
+  }
   | { kind: 'assistant'; time: number; text: string; model?: string; files?: SourceFileReference[] }
   | { kind: 'reasoning'; time: number; text: string }
   | { kind: 'tool-call'; time: number; callId: string; name: string; args: string }

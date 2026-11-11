@@ -28,7 +28,7 @@ interface CodeRange {
   end: number
 }
 
-interface MarkdownLink {
+export interface MarkdownLink {
   start: number
   end: number
   label: string
@@ -57,6 +57,11 @@ function decodeSafe(value: string): string {
   } catch {
     return value
   }
+}
+
+/** URL-style `/E:/…` is a Windows drive path with a leading slash. */
+function hostAbsolute(path: string): string {
+  return process.platform === 'win32' ? path.replace(/^\/+([A-Za-z]:[\\/])/u, '$1') : path
 }
 
 /** Fenced blocks and inline code must stay literal; links inside them are examples. */
@@ -166,6 +171,11 @@ function scanMarkdownLinks(text: string, ranges: readonly CodeRange[]): Markdown
   return links
 }
 
+/** Inline markdown links outside code spans and fences. */
+export function markdownLinksIn(text: string): MarkdownLink[] {
+  return scanMarkdownLinks(text, codeRanges(text))
+}
+
 /** Resolve one markdown destination under one rule, or decline. */
 function pathForHref(href: string, rule: FileLinkRule, cwd: string | undefined): string | undefined {
   if (href === '') return undefined
@@ -188,7 +198,7 @@ function pathForHref(href: string, rule: FileLinkRule, cwd: string | undefined):
     const stripped = href.replace(/[?#].*$/su, '')
     const decoded = decodeSafe(stripped)
     if (rule.accept.includes('absolute-path') && isAbsoluteAny(decoded)) {
-      path = decoded
+      path = hostAbsolute(decoded)
     } else if (
       rule.accept.includes('relative-path') &&
       cwd !== undefined &&

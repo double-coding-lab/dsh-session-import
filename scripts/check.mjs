@@ -63,6 +63,7 @@ try {
   run('rewind 分支重建自检', process.execPath, ['scripts/test-rebuild.ts'])
   run('Codex 分段导入自检', process.execPath, ['scripts/test-codex.ts'])
   run('Codex 数据库导入自检', process.execPath, ['scripts/test-codex-db.ts'])
+  run('用户文件附件自检', process.execPath, ['scripts/test-attachments.ts'])
   run('工作区清理自检', process.execPath, ['scripts/test-workspace-cleanup.ts'])
   run('账本并发自检', process.execPath, ['scripts/test-state.ts'])
 

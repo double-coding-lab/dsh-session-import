@@ -14,7 +14,7 @@
  */
 import { createHash } from 'node:crypto'
 import { readFile, readdir, stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
 import type {
   ImportRecord,
@@ -22,9 +22,11 @@ import type {
   ParsedSession,
   SessionIgnoreRule,
   SourceEvent,
+  SourceFileAttachment,
   SourceImage,
 } from '../../shared/types.ts'
 import { recordKey } from '../state.ts'
+import { markdownLinksIn } from '../file-links.ts'
 import { cleanTitleText } from './claude-jsonl.ts'
 
 export interface CodexDbConfig {
@@ -278,6 +280,21 @@ function workspaceFor(
   }
 }
 
+/** Codex writes a selected skill as a markdown link to its SKILL.md; DSH has no skill chip. */
+function withoutSkillLinks(text: string): string {
+  let out = ''
+  let cursor = 0
+  for (const link of markdownLinksIn(text)) {
+    const label = link.label.trim()
+    const href = link.href.trim()
+    if (!label.startsWith('$') || !/(^|[\\/])SKILL\.md$/i.test(href)) continue
+    out += text.slice(cursor, link.start)
+    cursor = link.end
+  }
+  out += text.slice(cursor)
+  return out.replace(/[ \t]{2,}/g, ' ')
+}
+
 function titleOf(thread: ThreadRow, options: CodexDbOptions): string | undefined {
   const fields = options.titleFields !== undefined && options.titleFields.length > 0
     ? options.titleFields
@@ -294,7 +311,7 @@ function titleOf(thread: ThreadRow, options: CodexDbOptions): string | undefined
     raw = thread.first_user_message ?? undefined
   }
   if (raw === undefined || raw.trim() === '') return undefined
-  const cleaned = cleanTitleText(raw)
+  const cleaned = cleanTitleText(withoutSkillLinks(raw))
   return cleaned ?? raw.trim().slice(0, 80)
 }
 
@@ -433,6 +450,8 @@ export async function scanCodexDb(
 
 /** Context Codex wraps around the actual request before storing the item. */
 const REQUEST_MARKERS = ['## My request for Codex:', '## My request:']
+const FILES_MENTIONED = '# Files mentioned by the user'
+const IMAGE_EXTENSION = /\.(png|jpe?g|webp|gif)$/i
 const IDE_CONTEXT_PREFIX = '# Context from my IDE setup'
 const SYNTHETIC_USER_PREFIXES = [
   '<environment_context',
@@ -443,9 +462,7 @@ const SYNTHETIC_USER_PREFIXES = [
   '<turn_aborted',
 ]
 
-/** Strip the IDE wrapper; return undefined for machine-only user items. */
-function userTextOf(raw: string, stats: ParseStats): string | undefined {
-  let text = raw
+function requestMarkerOf(text: string): { index: number; length: number } | undefined {
   let marker = -1
   let markerLength = 0
   for (const candidate of REQUEST_MARKERS) {
@@ -455,6 +472,77 @@ function userTextOf(raw: string, stats: ParseStats): string | undefined {
       markerLength = candidate.length
     }
   }
+  return marker < 0 ? undefined : { index: marker, length: markerLength }
+}
+
+/**
+ * Codex Desktop puts attached files above the request as
+ * `# Files mentioned by the user` + `## <label>: <path>` lines. Images are
+ * already carried by localImage/image content blocks and stay out of this list.
+ */
+function filesMentionedOf(raw: string): SourceFileAttachment[] {
+  const start = raw.indexOf(FILES_MENTIONED)
+  if (start < 0) return []
+  const marker = requestMarkerOf(raw)
+  const section = raw.slice(start, marker === undefined ? undefined : marker.index)
+  const files: SourceFileAttachment[] = []
+  const seen = new Set<string>()
+  for (const line of section.split(/\r?\n/)) {
+    const match = /^##\s+(.+?):\s+(.+)$/.exec(line.trim())
+    if (match === null) continue
+    const path = plainPath((match[2] ?? '').trim().replace(/^["'`]+|["'`]+$/g, ''))
+    if (path === '' || IMAGE_EXTENSION.test(path) || seen.has(path)) continue
+    seen.add(path)
+    files.push({ localPath: path })
+  }
+  return files
+}
+
+function decodePath(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/**
+ * Codex's composer writes a file chip as a plain markdown link whose label is
+ * the file name and whose target is relative to the thread cwd. Skill chips use
+ * the same syntax but point at SKILL.md and are handled by `withoutSkillLinks`.
+ */
+async function linkedFilesInText(text: string, cwd: string | undefined): Promise<SourceFileAttachment[]> {
+  if (cwd === undefined) return []
+  const files: SourceFileAttachment[] = []
+  const seen = new Set<string>()
+  for (const link of markdownLinksIn(text)) {
+    const href = link.href.trim()
+    if (href === '') continue
+    if (!/^[A-Za-z]:[\\/]/.test(href) && /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(href)) continue
+    const decoded = decodePath(href.replace(/[?#].*$/su, ''))
+    if (decoded === '') continue
+    const path = resolve(cwd, decoded)
+    if (!isUnder(path, cwd)) continue
+    if (link.label.trim() !== basename(path)) continue
+    if (IMAGE_EXTENSION.test(path) || seen.has(path)) continue
+    try {
+      const info = await stat(path)
+      if (!info.isFile() || info.size <= 0) continue
+    } catch {
+      continue
+    }
+    seen.add(path)
+    files.push({ localPath: path, mention: text.slice(link.start, link.end) })
+  }
+  return files
+}
+
+/** Strip the IDE wrapper; return undefined for machine-only user items. */
+function userTextOf(raw: string, stats: ParseStats): string | undefined {
+  let text = raw
+  const markerInfo = requestMarkerOf(text)
+  const marker = markerInfo?.index ?? -1
+  const markerLength = markerInfo?.length ?? 0
   if (marker >= 0) text = text.slice(marker + markerLength)
   else if (text.trimStart().startsWith(IDE_CONTEXT_PREFIX)) {
     stats.injectedUserMessages += 1
@@ -666,14 +754,20 @@ export async function parseCodexDb(
           }
         }
       }
-      const text = userTextOf(blockText(content), stats)
-      if (text === undefined || (text === '' && images.length === 0)) continue
+      const rawText = blockText(content)
+      const files = filesMentionedOf(rawText)
+      for (const file of await linkedFilesInText(rawText, cwd)) {
+        if (!files.some(existing => existing.localPath === file.localPath)) files.push(file)
+      }
+      const text = userTextOf(withoutSkillLinks(rawText), stats)
+      if (text === undefined || (text === '' && images.length === 0 && files.length === 0)) continue
       push({ kind: 'turn-boundary', time })
       push({
         kind: 'user',
         time,
         text,
         ...(images.length === 0 ? {} : { images }),
+        ...(files.length === 0 ? {} : { files }),
       })
       continue
     }

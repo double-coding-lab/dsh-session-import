@@ -10,7 +10,7 @@ import { createReadStream } from 'node:fs'
 import { basename } from 'node:path'
 import { createInterface } from 'node:readline'
 
-import type { ParseStats, ParsedSession, SourceEvent, SourceImage } from '../../shared/types.ts'
+import type { ParseStats, ParsedSession, SourceEvent, SourceFileAttachment, SourceImage } from '../../shared/types.ts'
 
 /** Loose shape of one transcript record; fields are read defensively. */
 interface RawRecord {
@@ -235,12 +235,43 @@ function plainText(text: string): string {
 const LEADING_UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[\s:：-]*/
 const LEADING_PATH = /^(?:[A-Za-z]:[\\/]|\/|~[\\/])\S*\s*/
 
+const IMAGE_EXTENSION = /\.(png|jpe?g|webp|gif)$/i
+
+/** Strip the quoting wrappers Qoder/Claude put around attachment paths. */
+function cleanAttachmentPath(raw: string): string {
+  return raw.trim().replace(/^["'`]+|["'`]+$/g, '').trim()
+}
+
+/**
+ * Qoder lists attachments as `附件引用：` + `- 文件：<path>`; Claude Code
+ * quotes an @-mention (`@"C:\…\file.docx"`). Both are source text, so the
+ * importer keeps unreadable paths in place and only removes stored ones.
+ */
+function attachmentsInText(text: string): { images: string[]; files: SourceFileAttachment[] } {
+  const images: string[] = []
+  const files: SourceFileAttachment[] = []
+  const seen = new Set<string>()
+  const add = (raw: string): void => {
+    const path = cleanAttachmentPath(raw)
+    if (path === '' || seen.has(path)) return
+    seen.add(path)
+    if (IMAGE_EXTENSION.test(path)) images.push(path)
+    else files.push({ localPath: path })
+  }
+  for (const match of text.matchAll(/^-\s*文件[：:]\s*(.+)$/gm)) add(match[1] ?? '')
+  for (const match of text.matchAll(/(?:^|\s)@(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([A-Za-z]:[\\/][^\s"']+))/g)) {
+    add(match[1] ?? match[2] ?? match[3] ?? '')
+  }
+  return { images, files }
+}
+
 /** Shared by the parser and the picker list so both show the same clean title. */
 export function cleanTitleText(raw: string): string | undefined {
   let text = raw.trim()
   if (text.length < 2) return undefined
   if (INJECTED_PREFIXES.some(prefix => text.startsWith(prefix))) return undefined
   text = text.replace(LEADING_UUID, '').replace(LEADING_PATH, '').trim()
+  text = text.replace(/@(?:"[^"\r\n]+"|'[^'\r\n]+')/g, ' ').replace(/\s+/g, ' ').trim()
   text = text.split(/附件引用[：:]/)[0]!.trim()
   const title = plainText(text).slice(0, 80)
   return title === '' ? undefined : title
@@ -408,15 +439,13 @@ export async function parseClaudeJsonl(
         }
       }
       const joined = texts.join('\n\n')
-      if (joined !== '' || images.length > 0) {
+      const attached = attachmentsInText(joined)
+      if (joined !== '' || images.length > 0 || attached.files.length > 0) {
         // The attachment list quotes the local copies in the same order as the
         // image blocks, so a positional pairing recovers durable files even
         // after the provider's signed URL expires.
-        const listed = [...joined.matchAll(/^-\s*文件：(.+)$/gm)]
-          .map(match => match[1].trim())
-          .filter(path => /\.(png|jpe?g|webp|gif)$/i.test(path))
         images.forEach((image, index) => {
-          const local = listed[index]
+          const local = attached.images[index]
           if (local !== undefined && local !== '') image.localPath = local
         })
         const continuation = joined.startsWith('This session is being continued')
@@ -431,7 +460,13 @@ export async function parseClaudeJsonl(
           injectedUserMessages += 1
         } else {
           push({ kind: 'turn-boundary', time })
-          push({ kind: 'user', time, text: joined, ...(images.length > 0 ? { images } : {}) })
+          push({
+            kind: 'user',
+            time,
+            text: joined,
+            ...(images.length > 0 ? { images } : {}),
+            ...(attached.files.length > 0 ? { files: attached.files } : {}),
+          })
         }
       }
     } else if (record.type === 'assistant') {
