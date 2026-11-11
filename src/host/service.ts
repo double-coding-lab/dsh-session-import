@@ -193,7 +193,7 @@ export function workspaceFieldsFor(
     if (meta.projectId !== undefined) {
       return {
         workspaceKey: `workbuddy-project:${meta.projectId}`,
-        workspaceName: projectNames?.get(meta.projectId) ?? '项目',
+        workspaceName: projectNames?.get(meta.projectId),
       }
     }
     if (meta.isPlayground) return {}

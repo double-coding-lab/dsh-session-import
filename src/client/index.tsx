@@ -10,6 +10,8 @@ import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { isScratchWorkspacePath } from '../shared/workspace.ts'
+import type { LocaleFace } from './i18n.ts'
+import { bindLocale, isEnglish, matchesCountText, serverMessage, sessionsText, tr, tx, useLocaleRevision, workspacesText } from './i18n.ts'
 
 export const inject: string[] = ['locale', 'sessions']
 
@@ -145,7 +147,7 @@ interface RetractTarget {
 
 /** Project display name, matching how the source tool's sidebar labels it. */
 function workspaceLabel(cwd?: string): string {
-  if (cwd === undefined || cwd === '') return '最近任务'
+  if (cwd === undefined || cwd === '') return tr('最近任务')
   const parts = cwd.split(/[\\/]/).filter(Boolean)
   return parts.at(-1) ?? cwd
 }
@@ -168,7 +170,12 @@ function groupByWorkspace(list: ScannedSession[]): WorkspaceGroup[] {
     if (group === undefined) {
       group = {
         key,
-        label: item.workspaceName ?? (scratch ? '最近任务' : workspaceLabel(item.cwd)),
+        label: item.workspaceName
+          ?? (item.workspaceKey?.startsWith('workbuddy-project:') === true
+            ? tr('项目')
+            : scratch
+              ? tr('最近任务')
+              : workspaceLabel(item.cwd)),
         ...(scratch || item.cwd === undefined ? {} : { path: item.cwd }),
         createdAt: item.createdAtMs ?? 0,
         ...(item.workspaceEphemeral === true ? { ephemeral: true } : {}),
@@ -233,11 +240,13 @@ interface ImportJobView {
   results: ImportReportEntry[]
 }
 
-const BADGE: Record<ScannedSession['status'], string> = {
-  new: '未导入',
-  imported: '已导入',
-  grown: '有新增内容，可重新导入',
-  failed: '失败',
+function badgeLabel(status: ScannedSession['status']): string {
+  switch (status) {
+    case 'new': return tr('未导入')
+    case 'imported': return tr('已导入')
+    case 'grown': return tr('有新增内容，可重新导入')
+    case 'failed': return tr('失败')
+  }
 }
 
 interface WorkspaceState {
@@ -251,13 +260,24 @@ interface WorkspaceState {
 /** One aggregate state per workspace; the row shows a glyph, the tooltip the full text. */
 function workspaceState(sessions: ScannedSession[]): WorkspaceState | undefined {
   const failed = sessions.filter(session => session.status === 'failed').length
-  if (failed > 0) return { kind: 'failed', text: `失败 ${failed} 个会话`, tone: 'error' }
+  if (failed > 0) return { kind: 'failed', text: tx(`失败 ${failed} 个会话`, `${failed} session${failed === 1 ? '' : 's'} failed`), tone: 'error' }
   const grown = sessions.filter(session => session.status === 'grown').length
-  if (grown > 0) return { kind: 'grown', text: `有新增 ${grown} 个会话，可重新导入`, tone: 'attention' }
+  if (grown > 0) {
+    return {
+      kind: 'grown',
+      text: tx(`有新增 ${grown} 个会话，可重新导入`, `${grown} session${grown === 1 ? '' : 's'} have new content and can be re-imported`),
+      tone: 'attention',
+    }
+  }
   const imported = sessions.filter(session => session.status === 'imported').length
-  if (imported === sessions.length) return { kind: 'all', text: '已全部导入', tone: 'muted' }
+  if (imported === sessions.length) return { kind: 'all', text: tr('已全部导入'), tone: 'muted' }
   if (imported > 0) {
-    return { kind: 'partial', text: `部分已导入 ${imported}/${sessions.length}`, tone: 'muted', ratio: imported / sessions.length }
+    return {
+      kind: 'partial',
+      text: tx(`部分已导入 ${imported}/${sessions.length}`, `Partly imported ${imported}/${sessions.length}`),
+      tone: 'muted',
+      ratio: imported / sessions.length,
+    }
   }
   return undefined
 }
@@ -378,7 +398,7 @@ function ProgressGlyph({ ratio }: { ratio: number }): React.ReactElement {
 /** Status as an icon (label in the tooltip) so the row stays quiet. */
 function StatusIcon({ status }: { status: ScannedSession['status'] }): React.ReactElement | null {
   if (status === 'new') return null
-  const label = BADGE[status]
+  const label = badgeLabel(status)
   return (
     <span className={`dsi-status dsi-status-${status}`} title={label} aria-label={label} role="img">
       <StateGlyph kind={status} />
@@ -425,6 +445,7 @@ function fileStamp(date: Date): string {
 }
 
 function Section(): React.ReactElement {
+  useLocaleRevision()
   const [providers, setProviders] = useState<ProviderSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [sessions, setSessions] = useState<Record<string, ScannedSession[]>>({})
@@ -458,7 +479,7 @@ function Section(): React.ReactElement {
       setSessions(Object.fromEntries(listings))
       setProviders(health.providers)
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(serverMessage(cause instanceof Error ? cause.message : String(cause)))
     } finally {
       setLoading(false)
     }
@@ -575,7 +596,9 @@ function Section(): React.ReactElement {
     const failures: Array<{ item: ScannedSession; message: string }> = []
     try {
       for (const [index, item] of items.entries()) {
-        setStatus(kind !== 'session' ? `正在撤回「${label}」 ${index + 1}/${items.length}…` : '正在撤回…')
+        setStatus(kind !== 'session'
+          ? tx(`正在撤回「${label}」 ${index + 1}/${items.length}…`, `Retracting “${label}” ${index + 1}/${items.length}…`)
+          : tr('正在撤回…'))
         try {
           const response = await fetch(`${API}/retract`, {
             method: 'POST',
@@ -589,7 +612,7 @@ function Section(): React.ReactElement {
             // non-JSON failure; report the status below
           }
           if (!response.ok || payload.ok !== true) {
-            throw new Error(payload.error ?? `HTTP ${response.status}`)
+            throw new Error(serverMessage(payload.error ?? `HTTP ${response.status}`))
           }
           done += 1
           if (item.dshSessionId !== undefined) forgetSession?.(item.dshSessionId)
@@ -599,9 +622,9 @@ function Section(): React.ReactElement {
       }
       const summary = failures.length === 0
         ? kind !== 'session'
-          ? `已撤回「${label}」的 ${done} 个会话`
-          : `已撤回「${label}」`
-        : `已撤回 ${done} 个 · 失败 ${failures.length} 个`
+          ? tx(`已撤回「${label}」的 ${done} 个会话`, `Retracted ${sessionsText(done)} from “${label}”`)
+          : tx(`已撤回「${label}」`, `Retracted “${label}”`)
+        : tx(`已撤回 ${done} 个 · 失败 ${failures.length} 个`, `Retracted ${done} · failed ${failures.length}`)
       setStatus(summary)
       refreshSidebar?.()
       void load()
@@ -619,7 +642,10 @@ function Section(): React.ReactElement {
       if (failures.length === 0) {
         setRetractTarget(undefined)
       } else {
-        setRetractError(`${failures.length} 个会话撤回失败：${failures[0]?.message ?? '未知错误'}`)
+        setRetractError(tx(
+          `${failures.length} 个会话撤回失败：${failures[0]?.message ?? tr('未知错误')}`,
+          `Failed to retract ${sessionsText(failures.length)}: ${failures[0]?.message ?? tr('未知错误')}`,
+        ))
         setRetractTarget({ ...retractTarget, items: failures.map(failure => failure.item) })
       }
     } finally {
@@ -647,11 +673,19 @@ function Section(): React.ReactElement {
       results.length === 1
         ? [workspaces[0] ?? '', results[0].title ?? ''].filter(part => part !== '').join(' · ')
         : workspaces.length === 0
-          ? results[0]?.title === undefined ? '' : `${results[0].title} 等 ${results.length} 个会话`
+          ? results[0]?.title === undefined
+            ? ''
+            : tx(`${results[0].title} 等 ${results.length} 个会话`, `${results[0].title} and ${sessionsText(results.length - 1)} more`)
           : workspaces.length <= 2
-            ? workspaces.join('、')
-            : `${workspaces.slice(0, 2).join('、')} 等 ${workspaces.length} 个工作区`
-    setStatus(`完成：导入 ${imported} · 跳过 ${skipped} · 失败 ${failed}${context === '' ? '' : ` · ${context}`}`)
+            ? workspaces.join(isEnglish() ? ', ' : '、')
+            : tx(
+                `${workspaces.slice(0, 2).join('、')} 等 ${workspaces.length} 个工作区`,
+                `${workspaces.slice(0, 2).join(', ')} and ${workspacesText(workspaces.length - 2)} more`,
+              )
+    setStatus(tx(
+      `完成：导入 ${imported} · 跳过 ${skipped} · 失败 ${failed}${context === '' ? '' : ` · ${context}`}`,
+      `Done: ${imported} imported · ${skipped} skipped · ${failed} failed${context === '' ? '' : ` · ${context}`}`,
+    ))
     setReport({
       kind: 'dsh-session-import.report',
       schemaVersion: 1,
@@ -680,7 +714,7 @@ function Section(): React.ReactElement {
         const job = status.job ?? undefined
         if (job === undefined) break
         if (job.running) {
-          setStatus(`正在导入 ${job.done}/${job.total}`)
+          setStatus(tx(`正在导入 ${job.done}/${job.total}`, `Importing ${job.done}/${job.total}`))
           await new Promise(resolve => setTimeout(resolve, 700))
           continue
         }
@@ -688,7 +722,7 @@ function Section(): React.ReactElement {
         break
       }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(serverMessage(cause instanceof Error ? cause.message : String(cause)))
     } finally {
       setBusy(false)
     }
@@ -751,13 +785,13 @@ function Section(): React.ReactElement {
         } catch {
           // keep the status text
         }
-        setError(message)
+        setError(serverMessage(message))
         if (response.status === 409) await followImportJob()
         return
       }
       await followImportJob()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
+      setError(serverMessage(cause instanceof Error ? cause.message : String(cause)))
     } finally {
       setBusy(false)
     }
@@ -827,7 +861,7 @@ function Section(): React.ReactElement {
         workspaceGroups: [] as WorkspaceView[],
         recentSessions: [] as ScannedSession[],
         allRecentSessions: [] as ScannedSession[],
-        recentLabel: '最近任务',
+        recentLabel: tr('最近任务'),
         loading: true,
         visibleCount: 0,
         scopeIds: [] as string[],
@@ -845,7 +879,7 @@ function Section(): React.ReactElement {
       .filter(group => group.sessions.length > 0)
       .sort((a, b) => b.createdAt - a.createdAt)
     const recentGroups = groups.filter(group => group.ephemeral === true || group.key === '')
-    const recentLabel = '最近任务'
+    const recentLabel = tr('最近任务')
     const allRecentSessions = recentGroups
       .flatMap(group => group.sessions)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -863,16 +897,19 @@ function Section(): React.ReactElement {
   const footerSummary = status !== ''
     ? status
     : totalSelected === 0
-      ? '已选 0 个会话'
+      ? tx('已选 0 个会话', 'Selected 0 sessions')
       : selectedWorkspaceCount > 0
-        ? `已选 ${totalSelected} 个会话 · ${selectedWorkspaceCount} 个工作区`
-        : `已选 ${totalSelected} 个会话`
+        ? tx(
+            `已选 ${totalSelected} 个会话 · ${selectedWorkspaceCount} 个工作区`,
+            `Selected ${sessionsText(totalSelected)} · ${workspacesText(selectedWorkspaceCount)}`,
+          )
+        : tx(`已选 ${totalSelected} 个会话`, `Selected ${sessionsText(totalSelected)}`)
 
   return (
     <div className="dsi-section">
       <div className="dsi-head">
-        <h1 className="dsi-title">会话导入</h1>
-        <p className="dsi-subtitle">把其他编辑器里的会话带进 DSH，导入后可直接继续对话。</p>
+        <h1 className="dsi-title">{tr('会话导入')}</h1>
+        <p className="dsi-subtitle">{tr('把其他编辑器里的会话带进 DSH，导入后可直接继续对话。')}</p>
       </div>
 
       <div className="dsi-search">
@@ -881,19 +918,19 @@ function Section(): React.ReactElement {
           className="dsi-search-input"
           type="search"
           value={query}
-          placeholder="搜索工作区或会话"
-          aria-label="搜索工作区或会话"
+          placeholder={tr('搜索工作区或会话')}
+          aria-label={tr('搜索工作区或会话')}
           onChange={event => changeQuery(event.target.value)}
         />
         {query !== '' && (
-          <button className="dsi-search-clear" type="button" aria-label="清空搜索" onClick={() => changeQuery('')}>
+          <button className="dsi-search-clear" type="button" aria-label={tr('清空搜索')} onClick={() => changeQuery('')}>
             <CloseIcon />
           </button>
         )}
       </div>
 
       {loading && (
-        <div className="dsi-skeleton" role="status" aria-label="正在扫描本机会话">
+        <div className="dsi-skeleton" role="status" aria-label={tr('正在扫描本机会话')}>
           {[148, 118, 172].map((width, index) => (
             <div className="dsi-sk-row" key={index}>
               <span className="dsi-sk-box" />
@@ -912,8 +949,10 @@ function Section(): React.ReactElement {
         const open = queryText !== '' ? !searchClosed.has(provider.id) : expanded === provider.id
         const chosenInScope = scopeIds.filter(id => chosen.has(id)).length
         const allScopeChosen = scopeIds.length > 0 && chosenInScope === scopeIds.length
-        const scopeLabel = queryText !== '' ? '全选匹配的会话' : `全选 ${provider.name} 会话`
-        const sessionLabel = (item: ScannedSession): string => item.title ?? '未命名会话'
+        const scopeLabel = queryText !== ''
+          ? tr('全选匹配的会话')
+          : tx(`全选 ${provider.name} 会话`, `Select all ${provider.name} sessions`)
+        const sessionLabel = (item: ScannedSession): string => item.title ?? tr('未命名会话')
         const sessionRow = (item: ScannedSession): React.ReactElement => (
           <label
             className={`dsi-check dsi-item${item.status !== 'new' ? ' dsi-item-act' : ''}`}
@@ -933,8 +972,8 @@ function Section(): React.ReactElement {
                 <button
                   className="dsi-icon-btn"
                   type="button"
-                  title="撤回"
-                  aria-label="撤回"
+                  title={tr('撤回')}
+                  aria-label={tr('撤回')}
                   disabled={busy || retracting}
                   onClick={event => {
                     event.preventDefault()
@@ -960,10 +999,13 @@ function Section(): React.ReactElement {
           session => session.status === 'imported' || session.status === 'grown',
         )
         const metaText = list === undefined
-          ? '扫描中…'
+          ? tr('扫描中…')
           : queryText !== ''
-            ? `${row.visibleCount} 个匹配会话`
-            : `${list.length} 个会话 · ${workspaceGroups.length} 个工作区`
+            ? matchesCountText(row.visibleCount)
+            : tx(
+                `${list.length} 个会话 · ${workspaceGroups.length} 个工作区`,
+                `${sessionsText(list.length)} · ${workspacesText(workspaceGroups.length)}`,
+              )
         const recentKey = `${provider.id}::__recent__`
         const recentOpen = queryText !== '' ? !searchClosed.has(recentKey) : openWorkspaces.has(recentKey)
         const chosenInRecent = recentSessions.filter(session => chosen.has(session.sourceSessionId)).length
@@ -1020,8 +1062,14 @@ function Section(): React.ReactElement {
                     <button
                       className="dsi-icon-btn dsi-provider-retract"
                       type="button"
-                      title={`撤回 ${provider.name} 的全部 ${providerRetractables.length} 个已导入会话`}
-                      aria-label={`撤回 ${provider.name} 的全部已导入会话`}
+                      title={tx(
+                        `撤回 ${provider.name} 的全部 ${providerRetractables.length} 个已导入会话`,
+                        `Retract all ${sessionsText(providerRetractables.length)} imported from ${provider.name}`,
+                      )}
+                      aria-label={tx(
+                        `撤回 ${provider.name} 的全部已导入会话`,
+                        `Retract all imported sessions from ${provider.name}`,
+                      )}
                       disabled={busy || retracting}
                       onClick={event => {
                         event.preventDefault()
@@ -1067,11 +1115,11 @@ function Section(): React.ReactElement {
                           else toggleWorkspace(wsKey)
                         }}
                       >
-                        <label className="dsi-check dsi-ws-check" title="全选该工作区">
+                        <label className="dsi-check dsi-ws-check" title={tr('全选该工作区')}>
                           <input
                             className="dsi-box-input"
                             type="checkbox"
-                            aria-label="全选该工作区"
+                            aria-label={tr('全选该工作区')}
                             checked={allGroupChosen}
                             onChange={() => selectMany(provider.id, group.sessions.map(session => session.sourceSessionId))}
                           />
@@ -1088,7 +1136,10 @@ function Section(): React.ReactElement {
                           className="dsi-ws-toggle"
                           type="button"
                           aria-expanded={wsOpen}
-                          title={`${group.path ?? group.label} · ${group.sessions.length} 个会话`}
+                          title={tx(
+                            `${group.path ?? group.label} · ${group.sessions.length} 个会话`,
+                            `${group.path ?? group.label} · ${sessionsText(group.sessions.length)}`,
+                          )}
                           onClick={() => {
                             if (queryText !== '') toggleSearchGroup(wsKey)
                             else toggleWorkspace(wsKey)
@@ -1102,8 +1153,11 @@ function Section(): React.ReactElement {
                             <button
                               className="dsi-icon-btn dsi-ws-retract"
                               type="button"
-                              title={`撤回该工作区的 ${retractables.length} 个已导入会话`}
-                              aria-label={`撤回工作区 ${group.label}`}
+                              title={tx(
+                                `撤回该工作区的 ${retractables.length} 个已导入会话`,
+                                `Retract ${sessionsText(retractables.length)} imported in this workspace`,
+                              )}
+                              aria-label={tx(`撤回工作区 ${group.label}`, `Retract workspace ${group.label}`)}
                               disabled={busy || retracting}
                               onClick={event => {
                                 event.preventDefault()
@@ -1146,11 +1200,11 @@ function Section(): React.ReactElement {
                         else toggleWorkspace(recentKey)
                       }}
                     >
-                      <label className="dsi-check dsi-ws-check" title={`全选${recentLabel}`}>
+                      <label className="dsi-check dsi-ws-check" title={tx(`全选${recentLabel}`, `Select all in ${recentLabel}`)}>
                         <input
                           className="dsi-box-input"
                           type="checkbox"
-                          aria-label={`全选${recentLabel}`}
+                          aria-label={tx(`全选${recentLabel}`, `Select all in ${recentLabel}`)}
                           checked={allRecentChosen}
                           onChange={() => selectMany(provider.id, recentSessions.map(session => session.sourceSessionId))}
                         />
@@ -1167,7 +1221,10 @@ function Section(): React.ReactElement {
                         className="dsi-ws-toggle"
                         type="button"
                         aria-expanded={recentOpen}
-                        title={`${recentLabel} · ${recentSessions.length} 个会话`}
+                        title={tx(
+                          `${recentLabel} · ${recentSessions.length} 个会话`,
+                          `${recentLabel} · ${sessionsText(recentSessions.length)}`,
+                        )}
                         onClick={() => {
                           if (queryText !== '') toggleSearchGroup(recentKey)
                           else toggleWorkspace(recentKey)
@@ -1181,8 +1238,14 @@ function Section(): React.ReactElement {
                           <button
                             className="dsi-icon-btn dsi-ws-retract"
                             type="button"
-                            title={`撤回${recentLabel}中的 ${recentRetractables.length} 个已导入会话`}
-                            aria-label={`撤回${recentLabel}中的已导入会话`}
+                            title={tx(
+                              `撤回${recentLabel}中的 ${recentRetractables.length} 个已导入会话`,
+                              `Retract ${sessionsText(recentRetractables.length)} imported from ${recentLabel}`,
+                            )}
+                            aria-label={tx(
+                              `撤回${recentLabel}中的已导入会话`,
+                              `Retract imported sessions from ${recentLabel}`,
+                            )}
                             disabled={busy || retracting}
                             onClick={event => {
                               event.preventDefault()
@@ -1221,7 +1284,7 @@ function Section(): React.ReactElement {
       })}
 
       {queryText !== '' && !hasVisibleProvider && (
-        <p className="dsi-empty">没有匹配的会话</p>
+        <p className="dsi-empty">{tr('没有匹配的会话')}</p>
       )}
 
       {error !== '' && <p className="dsi-error">{error}</p>}
@@ -1231,16 +1294,16 @@ function Section(): React.ReactElement {
         <div className="dsi-footer-actions">
           {totalSelected > 0 && (
             <button className="dsi-text" type="button" disabled={busy} onClick={clearSelection}>
-              清除选择
+              {tr('清除选择')}
             </button>
           )}
           {report !== undefined && (
-            <button className="dsi-ghost dsi-export" type="button" disabled={busy} onClick={exportReport} title="下载本次导入结果（JSON）">
-              导出日志
+            <button className="dsi-ghost dsi-export" type="button" disabled={busy} onClick={exportReport} title={tr('下载本次导入结果（JSON）')}>
+              {tr('导出日志')}
             </button>
           )}
           <button className="dsi-primary" type="button" disabled={busy || retracting || totalSelected === 0} onClick={() => setConfirming(true)}>
-            {busy ? '导入中…' : '导入'}
+            {busy ? tr('导入中…') : tr('导入')}
           </button>
         </div>
       </div>
@@ -1253,23 +1316,32 @@ function Section(): React.ReactElement {
             if (!busy) setConfirming(false)
           }}
         >
-          <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label="确认导入" onClick={event => event.stopPropagation()}>
-            <h2>确认导入</h2>
+          <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label={tr('确认导入')} onClick={event => event.stopPropagation()}>
+            <h2>{tr('确认导入')}</h2>
             <p>
-              将导入 {totalSelected} 个会话的完整历史。导入后会出现在左侧会话列表，可直接继续对话。
+              {tx(
+                `将导入 ${totalSelected} 个会话的完整历史。导入后会出现在左侧会话列表，可直接继续对话。`,
+                `${sessionsText(totalSelected)} will be imported. They appear in the sidebar and can be resumed right away.`,
+              )}
             </p>
             {branchRebuildCount > 0 && (
               <p>
-                其中 {branchRebuildCount} 个会话在源工具里被 rewind 分叉：会按最新分支重建 DSH 会话，被 rewind 掉的旧回合将被替换（源工具文件不受影响）。
+                {tx(
+                  `其中 ${branchRebuildCount} 个会话在源工具里被 rewind 分叉：会按最新分支重建 DSH 会话，被 rewind 掉的旧回合将被替换（源工具文件不受影响）。`,
+                  `${sessionsText(branchRebuildCount)} were forked by rewind in the source tool. They will be rebuilt from the latest branch; turns dropped by rewind are replaced. Source files are untouched.`,
+                )}
               </p>
             )}
             {sourceRebuildCount > 0 && (
               <p>
-                其中 {sourceRebuildCount} 个会话的源数据已从旧转录切换到 Codex 数据库：会按数据库内容重建 DSH 会话，旧导入内容将被替换。
+                {tx(
+                  `其中 ${sourceRebuildCount} 个会话的源数据已从旧转录切换到 Codex 数据库：会按数据库内容重建 DSH 会话，旧导入内容将被替换。`,
+                  `${sessionsText(sourceRebuildCount)} moved from an old transcript to the Codex database. They will be rebuilt from the database; the previously imported copy is replaced.`,
+                )}
               </p>
             )}
             <div className="dsi-dialog-actions">
-              <button className="dsi-ghost" type="button" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
+              <button className="dsi-ghost" type="button" disabled={busy} onClick={() => setConfirming(false)}>{tr('取消')}</button>
               <button
                 className="dsi-primary"
                 type="button"
@@ -1279,7 +1351,7 @@ function Section(): React.ReactElement {
                   void runImport()
                 }}
               >
-                {busy ? '导入中…' : `导入 ${totalSelected} 个会话`}
+                {busy ? tr('导入中…') : tx(`导入 ${totalSelected} 个会话`, `Import ${sessionsText(totalSelected)}`)}
               </button>
             </div>
           </div>
@@ -1294,38 +1366,47 @@ function Section(): React.ReactElement {
             if (!retracting) setRetractTarget(undefined)
           }}
         >
-          <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label="确认撤回" onClick={event => event.stopPropagation()}>
+          <div className="dsi-dialog" role="dialog" aria-modal="true" aria-label={tr('确认撤回')} onClick={event => event.stopPropagation()}>
             <h2>
               {retractTarget.kind === 'workspace'
-                ? '撤回工作区'
+                ? tr('撤回工作区')
                 : retractTarget.kind === 'provider'
-                  ? '撤回应用下的导入会话'
-                  : '撤回导入'}
+                  ? tr('撤回应用下的导入会话')
+                  : tr('撤回导入')}
             </h2>
             {retractTarget.kind === 'provider' ? (
               <>
                 <p>
-                  将撤回「{retractTarget.label}」下全部 {retractTarget.items.length} 个已导入会话及其对话记录。源工具里的会话不受影响，之后仍可重新导入。
+                  {tx(
+                    `将撤回「${retractTarget.label}」下全部 ${retractTarget.items.length} 个已导入会话及其对话记录。源工具里的会话不受影响，之后仍可重新导入。`,
+                    `This retracts all ${sessionsText(retractTarget.items.length)} imported under “${retractTarget.label}” and their chat logs. The source tool is untouched; you can import them again later.`,
+                  )}
                 </p>
-                <p>若某个工作区撤回后没有其他会话，会一并移除工作区注册；磁盘目录和会话日志不会删除。</p>
+                <p>{tr('若某个工作区撤回后没有其他会话，会一并移除工作区注册；磁盘目录和会话日志不会删除。')}</p>
               </>
             ) : retractTarget.kind === 'workspace' ? (
               <>
                 <p>
-                  将撤回工作区「{retractTarget.label}」中的 {retractTarget.items.length} 个已导入会话及其对话记录。源工具里的会话不受影响，之后仍可重新导入。
+                  {tx(
+                    `将撤回工作区「${retractTarget.label}」中的 ${retractTarget.items.length} 个已导入会话及其对话记录。源工具里的会话不受影响，之后仍可重新导入。`,
+                    `This retracts ${sessionsText(retractTarget.items.length)} imported in “${retractTarget.label}” and their chat logs. The source tool is untouched; you can import them again later.`,
+                  )}
                 </p>
-                <p>若撤回后该工作区没有其他会话，会一并移除工作区注册；磁盘目录和会话日志不会删除。</p>
+                <p>{tr('若撤回后该工作区没有其他会话，会一并移除工作区注册；磁盘目录和会话日志不会删除。')}</p>
               </>
             ) : (
               <p>
-                将删除 DSH 中的「{retractTarget.label}」及其对话记录。源工具里的会话不受影响，之后仍可重新导入。
+                {tx(
+                  `将删除 DSH 中的「${retractTarget.label}」及其对话记录。源工具里的会话不受影响，之后仍可重新导入。`,
+                  `This removes “${retractTarget.label}” from DSH and deletes its chat log. The source tool is untouched; you can import it again later.`,
+                )}
               </p>
             )}
             {retractTarget.items.some(item => item.dshSessionId !== undefined && isCurrentSession?.(item.dshSessionId) === true) && (
               <p>
                 {retractTarget.kind === 'session'
-                  ? '该会话当前已打开，撤回后会关闭当前视图。'
-                  : '其中 1 个会话当前已打开，撤回后会关闭当前视图。'}
+                  ? tr('该会话当前已打开，撤回后会关闭当前视图。')
+                  : tr('其中 1 个会话当前已打开，撤回后会关闭当前视图。')}
               </p>
             )}
             {retractError !== '' && <p className="dsi-error">{retractError}</p>}
@@ -1339,14 +1420,14 @@ function Section(): React.ReactElement {
                   setRetractError('')
                 }}
               >
-                取消
+                {tr('取消')}
               </button>
               <button className="dsi-primary" type="button" disabled={retracting} onClick={() => void retract()}>
                 {retracting
-                  ? <><Spinner /> 正在撤回…</>
+                  ? <><Spinner /> {tr('正在撤回…')}</>
                   : retractTarget.kind !== 'session'
-                    ? `撤回 ${retractTarget.items.length} 个会话`
-                    : '撤回'}
+                    ? tx(`撤回 ${retractTarget.items.length} 个会话`, `Retract ${sessionsText(retractTarget.items.length)}`)
+                    : tr('撤回')}
               </button>
             </div>
           </div>
@@ -1490,6 +1571,7 @@ function installStyles(): void {
 
 export function apply(ctx: Context): () => void {
   installStyles()
+  bindLocale((ctx as Context & { locale?: LocaleFace }).locale)
   const get = (ctx as Context & { get?: (name: string) => unknown }).get?.bind(ctx)
   const sessions = get?.('sessions') as SessionsFace | undefined
   refreshSidebar =
@@ -1574,7 +1656,7 @@ export function apply(ctx: Context): () => void {
     try {
       slots.inject('settings.section', () =>
         slots.register(
-          { name: 'settings.section', id: SECTION_ID, order: 30, label: () => '会话导入' },
+          { name: 'settings.section', id: SECTION_ID, order: 30, label: () => tr('会话导入') },
           Section,
         ))
       console.info('[dsh-session-import] settings section registered')
