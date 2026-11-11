@@ -1,0 +1,74 @@
+name: Publish package to npm
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish tagged package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Verify release commit belongs to main
+        shell: bash
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --ignore-scripts --registry=https://registry.npmjs.org
+
+      - name: Verify release tag matches package version
+        run: |
+          node - <<'NODE'
+          const pkg = require('./package.json')
+          const tag = process.env.GITHUB_REF_NAME.replace(/^v/, '')
+          if (pkg.version !== tag) {
+            console.error(`package.json version ${pkg.version} does not match release tag ${tag}`)
+            process.exit(1)
+          }
+          NODE
+
+      - name: Build and test
+        run: npm run check
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      - name: Check whether this version is already published
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if curl -fsS "https://registry.npmjs.org/@double-coding%2Fdsh-session-import/${VERSION}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Requires npm Trusted Publishing for this package:
+      # npmjs.com → package → Settings → Trusted publishing → GitHub Actions
+      # Organization: double-coding-lab, Repository: dsh-session-import, Workflow: publish-npm.yml
+      - name: Publish with provenance
+        if: steps.published.outputs.exists != 'true'
+        run: npm publish --access public --provenance
