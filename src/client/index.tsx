@@ -109,6 +109,15 @@ interface ScannedSession {
   createdAtMs?: number
   /** The active source branch differs from the imported one; re-import rebuilds. */
   branchChanged?: boolean
+  /** Ordered rollout files composing this row (Codex segments). */
+  sourcePaths?: string[]
+  /** The ledger points at an older source form; import rebuilds from the new one. */
+  sourceChanged?: boolean
+  /** Source-tool project grouping (Codex Desktop projects). */
+  workspaceKey?: string
+  workspaceName?: string
+  /** A projectless conversation, shown under the source tool's "chats". */
+  workspaceEphemeral?: boolean
 }
 
 interface WorkspaceGroup {
@@ -116,6 +125,7 @@ interface WorkspaceGroup {
   label: string
   path?: string
   createdAt: number
+  ephemeral?: boolean
   sessions: ScannedSession[]
 }
 
@@ -141,6 +151,9 @@ function isScratchWorkspace(cwd?: string): boolean {
   const path = cwd.replace(/\\/g, '/')
   if (/\/\.qoderwork\/workspace\//i.test(path)) return true
   if (/\/Documents\/Qoder\/\d{4}-\d{2}-\d{2}\//i.test(path)) return true
+  // Codex Desktop opens projectless chats in a dated scratch folder.
+  if (/(^|\/)Documents\/Codex$/i.test(path)) return true
+  if (/\/Documents\/Codex\/\d{4}-\d{2}-\d{2}\//i.test(path)) return true
   const name = path.replace(/\/+$/, '').split('/').pop() ?? ''
   return /^chat-\d+$/i.test(name)
 }
@@ -162,10 +175,17 @@ function canonicalWorkspaceKey(cwd?: string): string {
 function groupByWorkspace(list: ScannedSession[]): WorkspaceGroup[] {
   const map = new Map<string, WorkspaceGroup>()
   for (const item of list) {
-    const key = canonicalWorkspaceKey(item.cwd)
+    const key = item.workspaceKey ?? canonicalWorkspaceKey(item.cwd)
     let group = map.get(key)
     if (group === undefined) {
-      group = { key, label: workspaceLabel(item.cwd), path: item.cwd, createdAt: item.createdAtMs ?? 0, sessions: [] }
+      group = {
+        key,
+        label: item.workspaceName ?? workspaceLabel(item.cwd),
+        path: item.cwd,
+        createdAt: item.createdAtMs ?? 0,
+        ...(item.workspaceEphemeral === true ? { ephemeral: true } : {}),
+        sessions: [],
+      }
       map.set(key, group)
     }
     group.createdAt = Math.max(group.createdAt, item.createdAtMs ?? 0)
@@ -514,8 +534,8 @@ function Section(): React.ReactElement {
       const list = sessions[provider.id]
       if (chosen === undefined || chosen.size === 0 || list === undefined) continue
       for (const item of list) {
-        if (chosen.has(item.sourceSessionId) && !isScratchWorkspace(item.cwd) && item.cwd !== undefined) {
-          paths.add(canonicalWorkspaceKey(item.cwd))
+        if (chosen.has(item.sourceSessionId) && item.workspaceEphemeral !== true && !isScratchWorkspace(item.cwd) && item.cwd !== undefined) {
+          paths.add(item.workspaceKey ?? canonicalWorkspaceKey(item.cwd))
         }
       }
     }
@@ -529,6 +549,18 @@ function Section(): React.ReactElement {
       if (chosen === undefined || chosen.size === 0) continue
       for (const item of sessions[provider.id] ?? []) {
         if (chosen.has(item.sourceSessionId) && item.branchChanged === true) count += 1
+      }
+    }
+    return count
+  }, [providers, selected, sessions])
+
+  const sourceRebuildCount = useMemo(() => {
+    let count = 0
+    for (const provider of providers) {
+      const chosen = selected[provider.id]
+      if (chosen === undefined || chosen.size === 0) continue
+      for (const item of sessions[provider.id] ?? []) {
+        if (chosen.has(item.sourceSessionId) && item.sourceChanged === true) count += 1
       }
     }
     return count
@@ -692,7 +724,7 @@ function Section(): React.ReactElement {
       // A rebuild deletes and rewrites the log of an already-imported session;
       // leave its view first so the open conversation is not left on a removed log.
       const rebuilding = targets.find(({ session }) =>
-        session.branchChanged === true
+        (session.branchChanged === true || session.sourceChanged === true)
         && session.dshSessionId !== undefined
         && isCurrentSession?.(session.dshSessionId) === true,
       )
@@ -714,6 +746,7 @@ function Section(): React.ReactElement {
             providerName: provider.name,
             sourcePath: session.sourcePath,
             sourceSessionId: session.sourceSessionId,
+            ...(session.sourcePaths === undefined ? {} : { sourcePaths: session.sourcePaths }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
             bytes: session.bytes,
@@ -806,13 +839,14 @@ function Section(): React.ReactElement {
         workspaceGroups: [] as WorkspaceView[],
         recentSessions: [] as ScannedSession[],
         allRecentSessions: [] as ScannedSession[],
+        recentLabel: '最近任务',
         loading: true,
         visibleCount: 0,
         scopeIds: [] as string[],
       }
     }
     const groups = groupByWorkspace(list)
-    const allWorkspaceGroups = groups.filter(group => !isScratchWorkspace(group.key))
+    const allWorkspaceGroups = groups.filter(group => group.ephemeral !== true && !isScratchWorkspace(group.path))
     const workspaceGroups = allWorkspaceGroups
       .map(group => {
         const visibleSessions = queryText === '' || matchesText(group.label) || matchesText(group.path)
@@ -822,8 +856,12 @@ function Section(): React.ReactElement {
       })
       .filter(group => group.sessions.length > 0)
       .sort((a, b) => b.createdAt - a.createdAt)
-    const allRecentSessions = groups
-      .filter(group => isScratchWorkspace(group.key))
+    const recentGroups = groups.filter(group => group.ephemeral === true || isScratchWorkspace(group.path))
+    const recentLabels = [...new Set(recentGroups.map(group => group.label))]
+    // Codex projectless chats share one "聊天" bucket; Qoder's scratch folders
+    // keep the generic label because each one is a separate task.
+    const recentLabel = recentLabels.length === 1 ? recentLabels[0]! : '最近任务'
+    const allRecentSessions = recentGroups
       .flatMap(group => group.sessions)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
     const recentSessions = allRecentSessions
@@ -834,7 +872,7 @@ function Section(): React.ReactElement {
       ...workspaceGroups.flatMap(group => group.sessions.map(session => session.sourceSessionId)),
       ...recentSessions.map(session => session.sourceSessionId),
     ]
-    return { provider, list, workspaceGroups, recentSessions, allRecentSessions, loading: false, visibleCount, scopeIds }
+    return { provider, list, workspaceGroups, recentSessions, allRecentSessions, recentLabel, loading: false, visibleCount, scopeIds }
   })
   const hasVisibleProvider = providerRows.some(row => row.loading || row.visibleCount > 0)
   const footerSummary = status !== ''
@@ -883,7 +921,7 @@ function Section(): React.ReactElement {
       )}
 
       {!loading && providerRows.map(row => {
-        const { provider, list, workspaceGroups, recentSessions, allRecentSessions, scopeIds } = row
+        const { provider, list, workspaceGroups, recentSessions, allRecentSessions, recentLabel, scopeIds } = row
         if (queryText !== '' && !row.loading && row.visibleCount === 0) return null
         const chosen = selected[provider.id] ?? new Set<string>()
         const open = queryText !== '' ? !searchClosed.has(provider.id) : expanded === provider.id
@@ -1122,11 +1160,11 @@ function Section(): React.ReactElement {
                         else toggleWorkspace(recentKey)
                       }}
                     >
-                      <label className="dsi-check dsi-ws-check" title="全选最近任务">
+                      <label className="dsi-check dsi-ws-check" title={`全选${recentLabel}`}>
                         <input
                           className="dsi-box-input"
                           type="checkbox"
-                          aria-label="全选最近任务"
+                          aria-label={`全选${recentLabel}`}
                           checked={allRecentChosen}
                           onChange={() => selectMany(provider.id, recentSessions.map(session => session.sourceSessionId))}
                         />
@@ -1143,13 +1181,13 @@ function Section(): React.ReactElement {
                         className="dsi-ws-toggle"
                         type="button"
                         aria-expanded={recentOpen}
-                        title={`最近任务 · ${recentSessions.length} 个会话`}
+                        title={`${recentLabel} · ${recentSessions.length} 个会话`}
                         onClick={() => {
                           if (queryText !== '') toggleSearchGroup(recentKey)
                           else toggleWorkspace(recentKey)
                         }}
                       >
-                        <span className="dsi-ws-name">最近任务</span>
+                        <span className="dsi-ws-name">{recentLabel}</span>
                       </button>
                       <span className="dsi-ws-slot">
                         {recentState !== undefined && <WorkspaceStateIcon state={recentState} />}
@@ -1157,8 +1195,8 @@ function Section(): React.ReactElement {
                           <button
                             className="dsi-icon-btn dsi-ws-retract"
                             type="button"
-                            title={`撤回最近任务中的 ${recentRetractables.length} 个已导入会话`}
-                            aria-label="撤回最近任务中的已导入会话"
+                            title={`撤回${recentLabel}中的 ${recentRetractables.length} 个已导入会话`}
+                            aria-label={`撤回${recentLabel}中的已导入会话`}
                             disabled={busy || retracting}
                             onClick={event => {
                               event.preventDefault()
@@ -1167,7 +1205,7 @@ function Section(): React.ReactElement {
                               setRetractTarget({
                                 kind: 'workspace',
                                 providerId: provider.id,
-                                label: '最近任务',
+                                label: recentLabel,
                                 items: recentRetractables,
                               })
                             }}
@@ -1237,6 +1275,11 @@ function Section(): React.ReactElement {
             {branchRebuildCount > 0 && (
               <p>
                 其中 {branchRebuildCount} 个会话在源工具里被 rewind 分叉：会按最新分支重建 DSH 会话，被 rewind 掉的旧回合将被替换（源工具文件不受影响）。
+              </p>
+            )}
+            {sourceRebuildCount > 0 && (
+              <p>
+                其中 {sourceRebuildCount} 个会话的源数据已从旧转录切换到 Codex 数据库：会按数据库内容重建 DSH 会话，旧导入内容将被替换。
               </p>
             )}
             <div className="dsi-dialog-actions">

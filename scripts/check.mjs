@@ -61,6 +61,8 @@ try {
   run('无 active-leaf 导入自检', process.execPath, ['scripts/test-importer.ts', recoveryFixture])
   run('增量追平自检', process.execPath, ['scripts/test-growth.ts'])
   run('rewind 分支重建自检', process.execPath, ['scripts/test-rebuild.ts'])
+  run('Codex 分段导入自检', process.execPath, ['scripts/test-codex.ts'])
+  run('Codex 数据库导入自检', process.execPath, ['scripts/test-codex-db.ts'])
   run('工作区清理自检', process.execPath, ['scripts/test-workspace-cleanup.ts'])
   run('账本并发自检', process.execPath, ['scripts/test-state.ts'])
 

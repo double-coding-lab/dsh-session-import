@@ -221,6 +221,10 @@ function sameSourcePath(left: string, right: string): boolean {
   return norm(left) === norm(right)
 }
 
+function samePathList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => sameSourcePath(value, right[index] ?? ''))
+}
+
 /** First user-turn UUID, read cheaply from the transcript head. */
 async function readLineageId(path: string): Promise<string | undefined> {
   try {
@@ -278,13 +282,22 @@ export async function importSession(
   signal?: AbortSignal,
 ): Promise<ImportResult> {
   const now = deps.now ?? Date.now
-  const info = await stat(parsed.sourcePath)
-  const fingerprint = fingerprintOf(info.size, info.mtimeMs, await readHead(parsed.sourcePath))
+  // Database-backed sources have no stat-able file; their parser fingerprints
+  // the finished items it read instead.
+  const fingerprint = parsed.fingerprint ?? await fingerprintSource(parsed.sourcePath)
   const key = recordKey(parsed.providerId, parsed.sourceSessionId)
 
   const records = await deps.state.load()
   const existing = records[key]
-  if (existing !== undefined && sameFingerprint(existing.fingerprint, fingerprint)) {
+  const sameSegments = parsed.segmentPaths === undefined
+    ? true
+    : existing?.sourcePaths !== undefined && samePathList(existing.sourcePaths, parsed.segmentPaths)
+  if (
+    existing !== undefined
+    && sameSourcePath(existing.sourcePath, parsed.sourcePath)
+    && sameFingerprint(existing.fingerprint, fingerprint)
+    && sameSegments
+  ) {
     return {
       status: 'skipped',
       providerId: parsed.providerId,
@@ -350,11 +363,12 @@ export async function importSession(
       }
     }
 
-    // Claude Code rewinds fork the conversation into a new transcript that
-    // copies the shared turns, leaving the ledger on the abandoned branch.
-    // Appending would keep the dropped turns, so rewrite the DSH session from
-    // the active branch instead.
-    if (!sameSourcePath(existing.sourcePath, parsed.sourcePath) && deps.deleteSession !== undefined) {
+    // Two cases rewrite instead of append: a Claude Code rewind forked the
+    // conversation into a new transcript, and a Codex thread moved from an old
+    // rollout file to the desktop database. Both keep the DSH identity but the
+    // old log content must be replaced. Segmented sources never take this path:
+    // their files are parts, not branches.
+    if (parsed.segmentPaths === undefined && !sameSourcePath(existing.sourcePath, parsed.sourcePath) && deps.deleteSession !== undefined) {
       const expected = existing.lineageId
       const observed = parsed.lineageId
       const lineageOk = expected !== undefined && observed !== undefined
@@ -369,7 +383,7 @@ export async function importSession(
           return {
             ...rebuilt,
             rebuilt: true,
-            message: `已按最新分支重建（${mapped.turns} 轮 / ${mapped.events.length} 条事件）`,
+            message: `已按最新内容重建（${mapped.turns} 轮 / ${mapped.events.length} 条事件）`,
           }
         } catch (cause) {
           await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
@@ -449,6 +463,7 @@ export async function importSession(
       await deps.state.upsert({
         ...existing,
         ...(existing.lineageId === undefined && parsed.lineageId !== undefined ? { lineageId: parsed.lineageId } : {}),
+        ...(parsed.segmentPaths === undefined ? {} : { sourcePaths: parsed.segmentPaths }),
         fingerprint,
         lastImportAt: now(),
       })
@@ -526,6 +541,7 @@ export async function importSession(
     await deps.state.upsert({
       ...existing,
       ...(existing.lineageId === undefined && parsed.lineageId !== undefined ? { lineageId: parsed.lineageId } : {}),
+      ...(parsed.segmentPaths === undefined ? {} : { sourcePaths: parsed.segmentPaths }),
       fingerprint,
       importedTurns: mapped.turns,
       importedEventCount: previous + tail.length,
@@ -597,6 +613,7 @@ export async function importSession(
     providerId: parsed.providerId,
     sourceSessionId: parsed.sourceSessionId,
     sourcePath: parsed.sourcePath,
+    ...(parsed.segmentPaths === undefined ? {} : { sourcePaths: parsed.segmentPaths }),
     ...(parsed.lineageId === undefined ? {} : { lineageId: parsed.lineageId }),
     fingerprint,
     dshSessionId: sessionId,

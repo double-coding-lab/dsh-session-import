@@ -8,7 +8,7 @@
  */
 
 /** Format family — selects the parser implementation. */
-export type SourceFamily = 'claude-jsonl' | 'codex-jsonl'
+export type SourceFamily = 'claude-jsonl' | 'codex-jsonl' | 'codex-db'
 
 /** Per-platform candidate root directories, `~` allowed. */
 export interface ProviderRoots {
@@ -20,8 +20,19 @@ export interface ProviderRoots {
 export interface ProviderLayout {
   /** Glob relative to a root, e.g. `*​/*.jsonl`. */
   sessionGlob: string
+  /** Additional globs (e.g. flat archives beside dated session folders). */
+  sessionGlobs?: string[]
   /** Optional glob for subagent transcripts. */
   subagentGlob?: string
+  /**
+   * SQLite-backed source (Codex Desktop). Paths are relative to the provider
+   * root; `layout` is a placeholder for the shared asset contract.
+   */
+  database?: {
+    state: string
+    history: string
+    globalState?: string
+  }
 }
 
 /** One machine-only session rule; every declared condition must match. */
@@ -38,6 +49,12 @@ export interface SessionAsset {
   layout: ProviderLayout
   cwd?: { from?: string }
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
+  /**
+   * How transcripts of one logical conversation relate:
+   * - `branch`: rewinds fork the history; show the newest branch (Claude Code).
+   * - `segments`: resumes append new rollout files; compose all in order (Codex).
+   */
+  lineage?: { mode?: 'branch' | 'segments' }
   /**
    * Machine-only transcripts (plugin telemetry, acks, internal probes) that the
    * picker hides. Matched on picker metadata so no provider id branch is needed.
@@ -128,8 +145,12 @@ export interface ParsedSession {
   sourceSessionId: string
   providerId: string
   sourcePath: string
+  /** All rollout files that compose this session (Codex resumes). */
+  segmentPaths?: string[]
   /** First human-turn UUID; rewind branches of one conversation share it. */
   lineageId?: string
+  /** Sources without a physical file (Codex DB) supply their own fingerprint. */
+  fingerprint?: { bytes: number; mtimeMs: number; headHash: string }
   cwd?: string
   title?: string
   startedAt?: number
@@ -169,6 +190,8 @@ export interface ImportRecord {
   providerId: string
   sourceSessionId: string
   sourcePath: string
+  /** Ordered rollout files composing a segmented session (Codex). */
+  sourcePaths?: string[]
   /** First human-turn UUID; binds rewind branches to one imported session. */
   lineageId?: string
   fingerprint: { bytes: number; mtimeMs: number; headHash: string }

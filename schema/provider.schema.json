@@ -21,7 +21,7 @@
     },
     "family": {
       "type": "string",
-      "enum": ["claude-jsonl", "codex-jsonl"],
+      "enum": ["claude-jsonl", "codex-jsonl", "codex-db"],
       "description": "会话解析器家族；同族工具共享实现"
     },
     "assets": {
@@ -105,7 +105,22 @@
           "required": ["sessionGlob"],
           "properties": {
             "sessionGlob": { "type": "string" },
-            "subagentGlob": { "type": "string" }
+            "sessionGlobs": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "额外转录 glob（同一 root 下不同层级，如 Codex 的归档目录）"
+            },
+            "subagentGlob": { "type": "string" },
+            "database": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "history"],
+              "properties": {
+                "state": { "type": "string", "description": "线程/项目元数据 SQLite，相对 provider 根目录" },
+                "history": { "type": "string", "description": "线程消息 SQLite，相对 provider 根目录" },
+                "globalState": { "type": "string", "description": "桌面端全局状态 JSON（项目与线程映射）" }
+              }
+            }
           }
         },
         "cwd": {
@@ -121,6 +136,17 @@
           "properties": {
             "fields": { "type": "array", "items": { "type": "string" } },
             "fromFirstUserMessage": { "type": "boolean" }
+          }
+        },
+        "lineage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["branch", "segments"],
+              "description": "branch=rewind 分叉只显示最新分支；segments=续接文件按顺序合并为一个会话"
+            }
           }
         },
         "ignore": {

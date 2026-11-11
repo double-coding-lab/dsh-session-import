@@ -2,7 +2,7 @@
 
 把第三方 AI 编程工具的会话历史，导入成 DeepSeek Harness 的原生会话——**能浏览、能搜索、能直接接着聊**。
 
-> 当前状态：Qoder / Claude Code 已打通端到端（扫描 → 导入 → 续聊 → 增量 → 撤回）。见 [技术方案](docs/技术方案.md)。
+> 当前状态：Qoder / Claude Code / Codex 已打通端到端（扫描 → 导入 → 续聊 → 增量 → 撤回）。见 [技术方案](docs/技术方案.md)。
 
 ## 它解决什么
 
@@ -14,7 +14,8 @@
 |---|---|---|
 | Qoder | ✅ | `~/.qoder/projects/*/*.jsonl` |
 | Claude Code | ✅ | `~/.claude/projects/*/*.jsonl` |
-| Codex / WorkBuddy | ⏳ | 待补 provider 描述（纯数据，无需改代码） |
+| Codex | ✅ | `~/.codex/state_5.sqlite` + `~/.codex/thread_history_1.sqlite`（按桌面项目分组，只导入已完成回合） |
+| WorkBuddy | ⏳ | 待补 provider 描述（纯数据，无需改代码） |
 
 ## 安装
 

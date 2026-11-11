@@ -26,6 +26,8 @@ import {
   type SessionHeaderLike,
 } from './importer.ts'
 import { cleanTitleText, parseClaudeJsonl } from './parsers/claude-jsonl.ts'
+import { DEFAULT_CODEX_DB, parseCodexDb, scanCodexDb } from './parsers/codex-db.ts'
+import { parseCodexJsonl } from './parsers/codex-jsonl.ts'
 import { adaptFileLinks } from './file-links.ts'
 import { ImportStateStore, recordKey } from './state.ts'
 import { attachSessionToWorkspace, detachSessionFromWorkspaces, type AttachOutcome } from './workspaces.ts'
@@ -64,6 +66,10 @@ interface HintCacheEntry {
   lineageId?: string
   /** Newest user/assistant message time, used to pick the active branch. */
   lastMessageAt?: number
+  /** Source tool's logical session id (Codex rollout session_meta). */
+  sessionId?: string
+  /** Start time of this rollout segment (Codex resume ordering). */
+  segmentStartAt?: number
 }
 
 interface HintCache {
@@ -146,6 +152,15 @@ export interface ScannedSession {
   createdAtMs?: number
   /** The active source branch differs from the imported one; re-import rebuilds. */
   branchChanged?: boolean
+  /** The ledger points at another source form (e.g. old rollout, now DB). */
+  sourceChanged?: boolean
+  /** Ordered rollout files composing this row (segment lineage only). */
+  sourcePaths?: string[]
+  /** Source-tool project grouping (Codex Desktop projects). */
+  workspaceKey?: string
+  workspaceName?: string
+  /** A projectless conversation, grouped like the source tool's "chats". */
+  workspaceEphemeral?: boolean
 }
 
 /** Compare source paths the way Windows does (case-insensitive, either slash). */
@@ -157,10 +172,16 @@ function sameSourcePath(left: string, right: string): boolean {
   return normalizeSourcePath(left) === normalizeSourcePath(right)
 }
 
+function sameSourcePathList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => sameSourcePath(value, right[index] ?? ''))
+}
+
 /** One scanned transcript; lineage fields are scan-internal. */
 interface PendingScan extends ScannedSession {
   lineageId?: string
   lastMessageAt?: number
+  headHash?: string
+  segmentStartAt?: number
   record?: ImportRecord
 }
 
@@ -172,8 +193,23 @@ export async function scanProvider(
   provider: ProviderDescriptor,
   records: Record<string, ImportRecord> = {},
 ): Promise<ScannedSession[]> {
-  const glob = provider.assets.sessions?.layout.sessionGlob ?? '*/*.jsonl'
-  const depth = glob.split('/').length - 1
+  const sessionsAsset = provider.assets.sessions
+  if (provider.family === 'codex-db') {
+    return scanCodexDb({
+      providerId: provider.id,
+      root: rootsFor(provider)[0] ?? expandHome('~/.codex'),
+      database: sessionsAsset?.layout.database ?? DEFAULT_CODEX_DB,
+      ...(sessionsAsset?.title?.fields === undefined ? {} : { titleFields: sessionsAsset.title.fields }),
+      ...(sessionsAsset?.title?.fromFirstUserMessage === undefined
+        ? {}
+        : { fromFirstUserMessage: sessionsAsset.title.fromFirstUserMessage }),
+      ...(sessionsAsset?.ignore === undefined ? {} : { ignore: sessionsAsset.ignore }),
+    }, records)
+  }
+  const layout = provider.assets.sessions?.layout
+  const globs = layout?.sessionGlobs !== undefined && layout.sessionGlobs.length > 0
+    ? [...new Set([layout.sessionGlob, ...layout.sessionGlobs])]
+    : [layout?.sessionGlob ?? '*/*.jsonl']
   const entries: PendingScan[] = []
   const roots = rootsFor(provider)
   // A rebuilt rewind branch keeps the ledger identity of the branch that was
@@ -189,33 +225,46 @@ export async function scanProvider(
   let enumerationComplete = true
 
   const tasks: Array<{ file: string; dir: string; createdAtMs: number }> = []
-  for (const root of roots) {
-    let dirs: string[]
+  const taskPaths = new Set<string>()
+  const addDirectoryFiles = async (dir: string, createdAtMs: number): Promise<void> => {
     try {
-      const rootEntries = await readdir(root, { withFileTypes: true })
-      dirs = rootEntries.filter(entry => entry.isDirectory()).map(entry => join(root, entry.name))
+      const dirEntries = await readdir(dir, { withFileTypes: true })
+      for (const entry of dirEntries) {
+        if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue
+        const file = join(dir, entry.name)
+        if (taskPaths.has(file)) continue
+        taskPaths.add(file)
+        tasks.push({ file, dir, createdAtMs })
+      }
     } catch {
       enumerationComplete = false
-      continue
     }
-    for (const dir of dirs) {
-      if (depth > 1) continue
+  }
+  const walk = async (dir: string, remaining: number): Promise<void> => {
+    if (remaining <= 0) {
       let createdAtMs = 0
       try {
         createdAtMs = (await stat(dir)).birthtimeMs
       } catch {
         createdAtMs = 0
       }
-      try {
-        const dirEntries = await readdir(dir, { withFileTypes: true })
-        for (const entry of dirEntries) {
-          if (entry.isFile() && entry.name.endsWith('.jsonl')) {
-            tasks.push({ file: join(dir, entry.name), dir, createdAtMs })
-          }
-        }
-      } catch {
-        enumerationComplete = false
-      }
+      await addDirectoryFiles(dir, createdAtMs)
+      return
+    }
+    let subdirs: string[]
+    try {
+      const dirEntries = await readdir(dir, { withFileTypes: true })
+      subdirs = dirEntries.filter(entry => entry.isDirectory()).map(entry => join(dir, entry.name))
+    } catch {
+      enumerationComplete = false
+      return
+    }
+    for (const sub of subdirs) await walk(sub, remaining - 1)
+  }
+  for (const root of roots) {
+    for (const glob of globs) {
+      const depth = Math.min(8, Math.max(0, glob.split('/').length - 1))
+      await walk(root, depth)
     }
   }
 
@@ -225,19 +274,18 @@ export async function scanProvider(
   const scannedPaths = new Set(tasks.map(task => normalizeSourcePath(task.file)))
   const recordedPaths = new Set<string>()
   for (const record of recordsByPath.values()) {
-    const key = normalizeSourcePath(record.sourcePath)
-    if (scannedPaths.has(key)) recordedPaths.add(key)
+    for (const key of record.sourcePaths ?? [record.sourcePath]) {
+      const normalized = normalizeSourcePath(key)
+      if (scannedPaths.has(normalized)) recordedPaths.add(normalized)
+    }
   }
+  const lineageMode = provider.assets.sessions?.lineage?.mode ?? 'branch'
 
   await forEachConcurrent(tasks, SCAN_CONCURRENCY, async ({ file, dir, createdAtMs }) => {
         try {
           const info = await stat(file)
           const snapshot = { bytes: info.size, mtimeMs: info.mtimeMs }
-          const sessionId = basename(file, '.jsonl')
-          const pathRecord = recordsByPath.get(normalizeSourcePath(file))
-          const idRecord = records[recordKey(provider.id, sessionId)]
-          const record = pathRecord
-            ?? (idRecord !== undefined && !recordedPaths.has(normalizeSourcePath(idRecord.sourcePath)) ? idRecord : undefined)
+          const fileSessionId = basename(file, '.jsonl')
           seen.add(file)
           const cached = cache.entries[file]
           let hint: {
@@ -246,6 +294,8 @@ export async function scanProvider(
             headHash?: string
             lineageId?: string
             lastMessageAt?: number
+            sessionId?: string
+            segmentStartAt?: number
           }
           if (cached !== undefined && cached.bytes === snapshot.bytes && cached.mtimeMs === snapshot.mtimeMs) {
             hint = {
@@ -254,12 +304,22 @@ export async function scanProvider(
               ...(cached.headHash === undefined ? {} : { headHash: cached.headHash }),
               ...(cached.lineageId === undefined ? {} : { lineageId: cached.lineageId }),
               ...(cached.lastMessageAt === undefined ? {} : { lastMessageAt: cached.lastMessageAt }),
+              ...(cached.sessionId === undefined ? {} : { sessionId: cached.sessionId }),
+              ...(cached.segmentStartAt === undefined ? {} : { segmentStartAt: cached.segmentStartAt }),
             }
           } else {
             hint = await readSessionHint(file)
             cache.entries[file] = { bytes: snapshot.bytes, mtimeMs: snapshot.mtimeMs, ...hint }
             cacheDirty = true
           }
+          const sessionId = hint.sessionId ?? fileSessionId
+          const pathRecord = recordsByPath.get(normalizeSourcePath(file))
+          const idRecord = records[recordKey(provider.id, sessionId)]
+          const record = pathRecord
+            ?? (idRecord !== undefined
+              && (lineageMode === 'segments' || !recordedPaths.has(normalizeSourcePath(idRecord.sourcePath)))
+              ? idRecord
+              : undefined)
           // Source tools rewrite metadata records (titles, last-prompt) in place,
           // so an mtime-only change is not "grown" when bytes and the transcript
           // head still match the imported fingerprint.
@@ -301,6 +361,8 @@ export async function scanProvider(
             ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
             ...(hint.lineageId === undefined ? {} : { lineageId: hint.lineageId }),
             ...(hint.lastMessageAt === undefined ? {} : { lastMessageAt: hint.lastMessageAt }),
+            ...(hint.headHash === undefined ? {} : { headHash: hint.headHash }),
+            ...(hint.segmentStartAt === undefined ? {} : { segmentStartAt: hint.segmentStartAt }),
             ...(record === undefined ? {} : { record }),
           })
         } catch {
@@ -335,6 +397,42 @@ export async function scanProvider(
     else list.push(entry)
   }
   for (const group of groups.values()) {
+    if (lineageMode === 'segments') {
+      // Codex resumes append new rollout files: every file is a part of the
+      // same conversation, ordered by its own start time. Compose them all.
+      const ordered = [...group].sort(
+        (a, b) => (a.segmentStartAt ?? a.mtimeMs) - (b.segmentStartAt ?? b.mtimeMs),
+      )
+      const active = ordered[ordered.length - 1]!
+      const sourcePaths = ordered.map(entry => entry.sourcePath)
+      const record = ordered.find(entry => entry.record !== undefined)?.record
+      const unchanged = record !== undefined
+        && record.sourcePaths !== undefined
+        && sameSourcePathList(record.sourcePaths, sourcePaths)
+        && record.fingerprint.bytes === active.bytes
+        && (record.fingerprint.mtimeMs === active.mtimeMs
+          || (active.headHash !== undefined && record.fingerprint.headHash === active.headHash))
+      const continuationTitles = new Set(['继续', 'jixu', 'continue', '继续。'])
+      const title = ordered
+        .map(entry => entry.title)
+        .find(value => value !== undefined && !continuationTitles.has(value.trim().toLowerCase()))
+        ?? active.title
+      rows.push({
+        ...active,
+        ...(title === undefined ? {} : { title }),
+        sourceSessionId: record?.sourceSessionId ?? active.sourceSessionId,
+        ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
+        sourcePaths,
+        status: record === undefined
+          ? 'new'
+          : record.status === 'failed'
+            ? 'failed'
+            : unchanged
+              ? 'imported'
+              : 'grown',
+      })
+      continue
+    }
     if (group.length === 1) {
       rows.push(group[0]!)
       continue
@@ -368,7 +466,7 @@ export async function scanProvider(
   }
 
   return rows
-    .map(({ lineageId: _lineageId, lastMessageAt: _lastMessageAt, record: _record, ...row }) => row)
+    .map(({ lineageId: _lineageId, lastMessageAt: _lastMessageAt, headHash: _headHash, segmentStartAt: _segmentStartAt, record: _record, ...row }) => row)
     .sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
@@ -379,12 +477,28 @@ export async function scanProvider(
  * writes its `ai-title` and sometimes the first prompt at the end of a long
  * transcript — while a 60 MB log still does not slow the list down.
  */
+/** First text block of a Claude/Qoder/Codex message content payload. */
+function firstTextBlock(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const type = (block as { type?: unknown }).type
+    if (type !== 'text' && type !== 'input_text' && type !== 'output_text') continue
+    const text = (block as { text?: unknown }).text
+    if (typeof text === 'string' && text !== '') return text
+  }
+  return undefined
+}
+
 export async function readSessionHint(file: string): Promise<{
   title?: string
   cwd?: string
   headHash?: string
   lineageId?: string
   lastMessageAt?: number
+  sessionId?: string
+  segmentStartAt?: number
 }> {
   const HEAD_BYTES = 256 * 1024
   const TAIL_BYTES = 64 * 1024
@@ -422,6 +536,8 @@ export async function readSessionHint(file: string): Promise<{
   let cwd: string | undefined
   let lineageId: string | undefined
   let lastMessageAt: number | undefined
+  let sessionId: string | undefined
+  let segmentStartAt: number | undefined
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue
     let record: Record<string, unknown>
@@ -433,12 +549,40 @@ export async function readSessionHint(file: string): Promise<{
     if (lineageId === undefined && record['type'] === 'user' && typeof record['uuid'] === 'string') {
       lineageId = record['uuid']
     }
+    if (record['type'] === 'session_meta') {
+      const payload = record['payload'] as Record<string, unknown> | undefined
+      if (payload !== undefined) {
+        if (sessionId === undefined && typeof payload['session_id'] === 'string') sessionId = payload['session_id']
+        if (cwd === undefined && typeof payload['cwd'] === 'string') cwd = payload['cwd']
+        if (segmentStartAt === undefined) {
+          const stamp = payload['timestamp'] ?? record['timestamp']
+          const time = typeof stamp === 'number'
+            ? stamp
+            : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
+          if (Number.isFinite(time)) segmentStartAt = time
+        }
+      }
+    }
     if (record['type'] === 'user' || record['type'] === 'assistant') {
       const stamp = record['timestamp']
       const time = typeof stamp === 'number'
         ? stamp
         : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
       if (Number.isFinite(time) && (lastMessageAt === undefined || time > lastMessageAt)) lastMessageAt = time
+    }
+    if (record['type'] === 'response_item') {
+      const payload = record['payload'] as Record<string, unknown> | undefined
+      if (payload?.['type'] === 'message' && (payload['role'] === 'user' || payload['role'] === 'assistant')) {
+        const stamp = record['timestamp']
+        const time = typeof stamp === 'number'
+          ? stamp
+          : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
+        if (Number.isFinite(time) && (lastMessageAt === undefined || time > lastMessageAt)) lastMessageAt = time
+        if (userTitle === undefined && payload['role'] === 'user') {
+          const raw = firstTextBlock(payload['content'])
+          if (raw !== undefined) userTitle = cleanTitleText(raw)
+        }
+      }
     }
     if (cwd === undefined) {
       if (record['type'] === 'workspace-directories') {
@@ -458,24 +602,21 @@ export async function readSessionHint(file: string): Promise<{
     }
     if (userTitle === undefined && record['type'] === 'user') {
       const message = record['message'] as { content?: unknown } | undefined
-      const content = message?.content
-      let raw: string | undefined
-      if (typeof content === 'string') raw = content
-      else if (Array.isArray(content)) {
-        const first = content.find(block => (block as { type?: string })?.type === 'text') as { text?: string } | undefined
-        if (typeof first?.text === 'string') raw = first.text
-      }
+      const raw = firstTextBlock(message?.content)
       if (raw !== undefined) userTitle = cleanTitleText(raw)
     }
     if (fieldTitle !== undefined && cwd !== undefined && lineageId !== undefined && lastMessageAt !== undefined) break
   }
   const title = fieldTitle ?? userTitle
+  const lineage = sessionId ?? lineageId
   return {
     headHash,
     ...(title === undefined ? {} : { title }),
     ...(cwd === undefined ? {} : { cwd }),
-    ...(lineageId === undefined ? {} : { lineageId }),
+    ...(lineage === undefined ? {} : { lineageId: lineage }),
     ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(segmentStartAt === undefined ? {} : { segmentStartAt }),
   }
 }
 
@@ -560,11 +701,14 @@ export async function retractImport(
     await runtime.evict(record.dshSessionId)
   }
 
-  const removedPaths = await removeSessionDirectories(record.dshSessionId)
-
+  // Detach while the session header still exists: DSH's workspace entity
+  // filters `sessionIds` by a session-cwd check, so deleting the log first makes
+  // the session invisible to the registry and leaves an empty folder behind.
   await (workspace === undefined
     ? detachSessionFromWorkspaces(dshHome(), record.dshSessionId)
     : workspace.detach(record.dshSessionId))
+
+  const removedPaths = await removeSessionDirectories(record.dshSessionId)
   await store.remove(providerId, sourceSessionId)
   return {
     providerId,
@@ -713,6 +857,8 @@ export function dshHome(): string {
 export interface ImportRequest {
   providerId: string
   sourcePath: string
+  /** All rollout files composing a segmented session (Codex). */
+  sourcePaths?: string[]
   /**
    * Logical session id. A rewind branch row carries the id of the branch that
    * owns the ledger record, so the rebuilt log keeps the same DSH identity.
@@ -822,9 +968,32 @@ export async function runImport(
   evictLive?: (sessionId: string) => Promise<void>,
   deleteSession?: (sessionId: string) => Promise<void>,
 ): Promise<ImportResult> {
-  const parsed = await parseClaudeJsonl(request.sourcePath, {
-    providerId: request.providerId,
-  })
+  const sourcePaths = request.sourcePaths !== undefined && request.sourcePaths.length > 0
+    ? request.sourcePaths
+    : [request.sourcePath]
+  let parsed: ParsedSession
+  if (request.provider?.family === 'codex-db') {
+    const marker = '#thread='
+    const markerIndex = request.sourcePath.lastIndexOf(marker)
+    const threadId = request.sourceSessionId !== undefined && request.sourceSessionId !== ''
+      ? request.sourceSessionId
+      : markerIndex < 0 ? '' : request.sourcePath.slice(markerIndex + marker.length)
+    if (threadId === '') throw new Error('Codex 导入缺少会话 ID')
+    const sessionsAsset = request.provider.assets.sessions
+    parsed = await parseCodexDb(threadId, {
+      providerId: request.providerId,
+      root: rootsFor(request.provider)[0] ?? expandHome('~/.codex'),
+      database: sessionsAsset?.layout.database ?? DEFAULT_CODEX_DB,
+      ...(sessionsAsset?.title?.fields === undefined ? {} : { titleFields: sessionsAsset.title.fields }),
+      ...(sessionsAsset?.title?.fromFirstUserMessage === undefined
+        ? {}
+        : { fromFirstUserMessage: sessionsAsset.title.fromFirstUserMessage }),
+    })
+  } else if (request.provider?.family === 'codex-jsonl') {
+    parsed = await parseCodexJsonl(sourcePaths, { providerId: request.providerId })
+  } else {
+    parsed = await parseClaudeJsonl(request.sourcePath, { providerId: request.providerId })
+  }
   const adapted = adaptFileLinks(parsed.events, request.provider?.fileLinks?.assistant, parsed.cwd)
   const logicalId = request.sourceSessionId === undefined || request.sourceSessionId === ''
     ? parsed.sourceSessionId

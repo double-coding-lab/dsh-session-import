@@ -6,7 +6,7 @@
  *   GET  /sessions  scan one provider's transcripts (metadata only)
  *   POST /import    parse + write a real DSH session
  */
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -41,6 +41,7 @@ export const ROUTE_PREFIX = '/dsh-session-import'
 interface ImportBatchTarget {
   providerId: string
   sourcePath: string
+  sourcePaths?: string[]
   sourceSessionId?: string
   providerName?: string
   title?: string
@@ -107,6 +108,15 @@ function loadProviders(): ProviderDescriptor[] {
   return loadProviderEntries().map(entry => entry.descriptor)
 }
 
+/** Icon URL version so replacing a mark busts the browser cache immediately. */
+function iconVersion(dir: string, icon: string): string {
+  try {
+    return String(Math.round(statSync(resolve(dir, icon)).mtimeMs))
+  } catch {
+    return '0'
+  }
+}
+
 function iconMime(file: string): string {
   switch (extname(file).toLowerCase()) {
     case '.svg':
@@ -137,6 +147,8 @@ interface WorkspaceEntityFace {
   id: string
   path: string
   sessionIds: string[]
+  /** DSH's raw record; `sessionIds` filters by a live session-cwd check. */
+  record?: { sessionIds?: unknown }
   attachSession(sessionId: string): Promise<void>
   detachSession(sessionId: string): Promise<void>
 }
@@ -280,8 +292,11 @@ export function apply(ctx: Context): () => void {
       if (registry !== undefined && typeof registry.list === 'function') {
         try {
           for (const entity of registry.list()) {
-            if (Array.isArray(entity.sessionIds) && entity.sessionIds.includes(sessionId)) {
-              const wasOnly = entity.sessionIds.length === 1
+            const rawIds = Array.isArray(entity.record?.sessionIds)
+              ? entity.record.sessionIds as string[]
+              : entity.sessionIds
+            if (Array.isArray(rawIds) && rawIds.includes(sessionId)) {
+              const wasOnly = rawIds.length === 1
               await entity.detachSession(sessionId)
               if (wasOnly && typeof registry.delete === 'function') {
                 try {
@@ -374,14 +389,14 @@ export function apply(ctx: Context): () => void {
             ok: true,
             plugin: name,
             version,
-            providers: loadProviderEntries().map(({ descriptor: provider }) => ({
+            providers: loadProviderEntries().map(({ descriptor: provider, dir }) => ({
               id: provider.id,
               name: provider.name,
               family: provider.family,
               assets: Object.keys(provider.assets),
               ...(provider.icon === undefined
                 ? {}
-                : { icon: `${ROUTE_PREFIX}/api/icon?provider=${encodeURIComponent(provider.id)}` }),
+                : { icon: `${ROUTE_PREFIX}/api/icon?provider=${encodeURIComponent(provider.id)}&v=${iconVersion(dir, provider.icon)}` }),
             })),
             services: {
               persistence: persistence !== undefined,
@@ -421,6 +436,9 @@ export function apply(ctx: Context): () => void {
           const result = await runImport(persistence, {
             providerId,
             sourcePath,
+            ...(Array.isArray(body.sourcePaths) && body.sourcePaths.every(value => typeof value === 'string')
+              ? { sourcePaths: body.sourcePaths as string[] }
+              : {}),
             ...(typeof body.sourceSessionId === 'string' && body.sourceSessionId !== ''
               ? { sourceSessionId: body.sourceSessionId }
               : {}),
@@ -451,6 +469,9 @@ export function apply(ctx: Context): () => void {
             targets.push({
               providerId: item['providerId'],
               sourcePath: item['sourcePath'],
+              ...(Array.isArray(item['sourcePaths']) && item['sourcePaths'].every(value => typeof value === 'string')
+                ? { sourcePaths: item['sourcePaths'] as string[] }
+                : {}),
               ...(typeof item['sourceSessionId'] === 'string' && item['sourceSessionId'] !== ''
                 ? { sourceSessionId: item['sourceSessionId'] }
                 : {}),
@@ -498,6 +519,7 @@ export function apply(ctx: Context): () => void {
               result = await runImport(persistence, {
                 providerId: target.providerId,
                 sourcePath: target.sourcePath,
+                ...(target.sourcePaths === undefined ? {} : { sourcePaths: target.sourcePaths }),
                 ...(target.sourceSessionId === undefined ? {} : { sourceSessionId: target.sourceSessionId }),
                 options,
                 provider,
@@ -589,7 +611,9 @@ export function apply(ctx: Context): () => void {
             const data = readFileSync(file)
             res.statusCode = 200
             res.setHeader('content-type', iconMime(file))
-            res.setHeader('cache-control', 'public, max-age=3600')
+            // Provider icons live in the plugin directory and can change without
+            // a URL change; a cached hour would keep showing the old mark.
+            res.setHeader('cache-control', 'no-cache, max-age=0')
             res.end(data)
           } catch {
             sendJson(res, 404, { ok: false, error: 'icon-missing' })

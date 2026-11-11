@@ -1,0 +1,68 @@
+{
+  "$schema": "../../schema/provider.schema.json",
+  "schemaVersion": 1,
+  "id": "codex",
+  "name": "Codex",
+  "icon": "icon.png",
+  "family": "codex-db",
+  "assets": {
+    "sessions": {
+      "roots": {
+        "win32": [
+          "~/.codex"
+        ],
+        "darwin": [
+          "~/.codex"
+        ],
+        "linux": [
+          "~/.codex"
+        ]
+      },
+      "layout": {
+        "sessionGlob": "state_5.sqlite",
+        "database": {
+          "state": "state_5.sqlite",
+          "history": "thread_history_1.sqlite",
+          "globalState": ".codex-global-state.json"
+        }
+      },
+      "title": {
+        "fields": [
+          "name",
+          "title"
+        ],
+        "fromFirstUserMessage": true
+      },
+      "ignore": {
+        "titlePrefixes": [
+          "Generate slide ",
+          "Use only the prompt content below",
+          "Read the file .git-commit-helper-codex-prompt.md",
+          "Read the file README.md in the current working directory",
+          "Reply with only:",
+          "Reply only with OK",
+          "You are a memory extractor",
+          "# Instructions (read first)",
+          "You are a helpful assistant. You will be presented with a user prompt",
+          "Generate a concise UI title"
+        ]
+      }
+    }
+  },
+  "fileLinks": {
+    "assistant": [
+      {
+        "syntax": "markdown-link",
+        "accept": [
+          "absolute-path"
+        ]
+      }
+    ]
+  },
+  "capabilities": {
+    "resume": true,
+    "images": true,
+    "subagents": false,
+    "reasoning": true
+  }
+}
