@@ -191,7 +191,7 @@ const provider: ProviderDescriptor = {
   family: 'codex-db',
   assets: {
     sessions: {
-      roots: { win32: [root] },
+      roots: { win32: [root], darwin: [root], linux: [root] },
       layout: {
         sessionGlob: 'state_5.sqlite',
         database: {

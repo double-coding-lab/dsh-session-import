@@ -93,7 +93,7 @@ const provider: ProviderDescriptor = {
   family: 'codex-jsonl',
   assets: {
     sessions: {
-      roots: { win32: [join(dir, 'sessions')] },
+      roots: { win32: [join(dir, 'sessions')], darwin: [join(dir, 'sessions')], linux: [join(dir, 'sessions')] },
       layout: {
         sessionGlob: '*/*/*/rollout-*.jsonl',
         sessionGlobs: ['*/*/*/rollout-*.jsonl'],
