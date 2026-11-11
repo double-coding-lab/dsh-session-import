@@ -35,7 +35,7 @@ Settings → **Session Import**. Sessions are grouped by app → workspace, and 
 
 ## What it does
 
-- **Imports only the part that still fits**: it starts at the source session's last compaction point and keeps the most recent 80 turns; switch `fidelity` to `full` for everything.
+- **Imports only the part that still fits**: Claude-family sessions start after the last compaction point instead of replaying the whole history. A single text block over 262144 characters keeps its head and tail around a truncation marker, so a huge tool result cannot blow up the context.
 - **Re-importing never forks copies**: a source fingerprint plus an event-prefix hash decides what to do. A longer source appends only the new events; a shifted prefix stops with an error instead of stitching two histories together.
 - **A failed import leaves nothing behind**: every write is read back through `sessionPersistence` before the session is reported as done.
 - **Interrupted sessions can be recovered**: Qoder only writes `active-leaf` on a clean exit; without it, the parser takes the newest leaf and drops abandoned branches.
@@ -95,19 +95,6 @@ Replace `<profile>` the same way, then restart as above.
 ### Open the panel
 
 After the restart, go to **Settings → Session Import**. The first open scans every supported source tool on this machine. Nothing is uploaded.
-
-## Configuration
-
-```yaml
-- id: dsh-session-import
-  name: "@double-coding/dsh-session-import"
-  config:
-    showSidebarEntry: true   # show Session Import in the sidebar
-    fidelity: window         # window starts at the last compaction point; full = complete history
-    maxTurns: 80             # recent turns kept in window mode
-    perTextLimit: 262144     # character cap for a single text block
-    keepReasoning: false     # signed thinking blocks cannot be replayed; dropped by default
-```
 
 ## Files and attachments
 

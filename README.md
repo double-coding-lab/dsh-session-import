@@ -35,7 +35,7 @@
 
 ## 主要能力
 
-- **只搬还能续聊的那一段**：默认从源会话最后一个压缩点开始，保留最近 80 轮；需要全量时把 `fidelity` 切成 `full`。
+- **只搬还能续聊的那一段**：Claude 系的会话从最后一次压缩点之后开始，不把整个历史重放一遍；单个文本块超过 262144 字符时保留头尾并插入截断标记，避免巨型工具结果撑爆上下文。
 - **重复导入不会多出副本**：按源文件指纹和事件前缀哈希判断。源变长了只追加新增事件；前缀对不上直接报错，不会把两段历史硬缝在一起。
 - **失败不会留下半截会话**：写完立刻用 `sessionPersistence` 回读校验，读不回就按失败处理。
 - **中断的源会话也能恢复**：Qoder 正常退出才写 `active-leaf`；没有这个标记时，解析器取最新叶子并排除被放弃的分支。
@@ -95,19 +95,6 @@ dsh plugin --profile <profile> add link:.
 ### 打开面板
 
 重启后进入「设置 → 会话导入」。首次打开会扫描本机所有已支持的源工具目录，不会上传任何数据。
-
-## 配置
-
-```yaml
-- id: dsh-session-import
-  name: "@double-coding/dsh-session-import"
-  config:
-    showSidebarEntry: true   # 侧栏显示「会话导入」入口
-    fidelity: window         # window 从最后一个压缩点开始；full 导入完整历史
-    maxTurns: 80             # window 档保留的最近轮数
-    perTextLimit: 262144     # 单个文本块的字符上限
-    keepReasoning: false     # 推理块带签名，跨工具不可重放，默认丢弃
-```
 
 ## 文件与附件
 
