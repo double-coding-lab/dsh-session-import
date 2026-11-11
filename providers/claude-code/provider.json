@@ -13,8 +13,18 @@
         "linux": ["~/.claude/projects"]
       },
       "layout": { "sessionGlob": "*/*.jsonl" },
-      "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true }
+      "title": { "fields": ["aiTitle", "customTitle"], "fromFirstUserMessage": true },
+      "ignore": {
+        "sessions": [
+          { "cwdContains": "claude-sandbox-status-" }
+        ]
+      }
     }
+  },
+  "fileLinks": {
+    "assistant": [
+      { "syntax": "markdown-link", "accept": ["absolute-path"] }
+    ]
   },
   "capabilities": { "resume": true, "images": true, "subagents": false, "reasoning": true }
 }

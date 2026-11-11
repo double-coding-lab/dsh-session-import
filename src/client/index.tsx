@@ -54,7 +54,30 @@ interface UiWorkspaceFace {
 let refreshSidebar: (() => void) | undefined
 let forgetSession: ((sessionId: string) => void) | undefined
 let isCurrentSession: ((sessionId: string) => boolean) | undefined
-let leaveCurrentSession: ((removedId: string) => void) | undefined
+let leaveCurrentSession: ((removedId: string) => boolean) | undefined
+let moveToSurvivingSession: ((removedId: string, exclude: ReadonlySet<string>) => boolean) | undefined
+
+const SETTINGS_MODAL_SELECTOR = '[data-shortcut-modal="settings"]'
+let pendingLeave: MutationObserver | undefined
+
+/**
+ * The Host auto-closes its settings dialog when the main view drops back to the
+ * blank new-chat state (an onboarding step appears), so view cleanup caused by a
+ * retract must wait until the dialog is gone.
+ */
+function leaveAfterSettingsClose(removedId: string): boolean {
+  if (document.querySelector(SETTINGS_MODAL_SELECTOR) === null) return false
+  pendingLeave?.disconnect()
+  const observer = new MutationObserver(() => {
+    if (document.querySelector(SETTINGS_MODAL_SELECTOR) !== null) return
+    observer.disconnect()
+    if (pendingLeave === observer) pendingLeave = undefined
+    leaveCurrentSession?.(removedId)
+  })
+  pendingLeave = observer
+  observer.observe(document.body, { childList: true })
+  return true
+}
 
 /** A page-level notice survives the settings panel closing after retraction. */
 function showToast(text: string, tone: 'success' | 'error' = 'success'): void {
@@ -84,6 +107,8 @@ interface ScannedSession {
   dshSessionId?: string
   cwd?: string
   createdAtMs?: number
+  /** The active source branch differs from the imported one; re-import rebuilds. */
+  branchChanged?: boolean
 }
 
 interface WorkspaceGroup {
@@ -497,10 +522,33 @@ function Section(): React.ReactElement {
     return paths.size
   }, [providers, selected, sessions])
 
+  const branchRebuildCount = useMemo(() => {
+    let count = 0
+    for (const provider of providers) {
+      const chosen = selected[provider.id]
+      if (chosen === undefined || chosen.size === 0) continue
+      for (const item of sessions[provider.id] ?? []) {
+        if (chosen.has(item.sourceSessionId) && item.branchChanged === true) count += 1
+      }
+    }
+    return count
+  }, [providers, selected, sessions])
+
   const retract = useCallback(async () => {
     if (retractTarget === undefined) return
     const { providerId, label, items, kind } = retractTarget
     const currentItem = items.find(item => item.dshSessionId !== undefined && isCurrentSession?.(item.dshSessionId) === true)
+    // Removing the session on screen drops the app back to the empty new-chat
+    // state, and the Host closes its settings dialog on that transition. Move to
+    // a session the batch keeps before its row disappears.
+    const retractingIds = new Set(
+      items
+        .map(item => item.dshSessionId)
+        .filter((id): id is string => id !== undefined),
+    )
+    const movedAway = currentItem?.dshSessionId === undefined
+      ? false
+      : moveToSurvivingSession?.(currentItem.dshSessionId, retractingIds) === true
     setRetracting(true)
     setRetractError('')
     let done = 0
@@ -538,10 +586,13 @@ function Section(): React.ReactElement {
       refreshSidebar?.()
       void load()
       const tone = failures.length === 0 ? 'success' : 'error'
-      if (currentItem !== undefined) {
-        leaveCurrentSession?.(currentItem.dshSessionId ?? '')
+      if (currentItem !== undefined && !movedAway) {
+        const removedId = currentItem.dshSessionId ?? ''
+        const deferred = leaveAfterSettingsClose(removedId)
+        if (!deferred) leaveCurrentSession?.(removedId)
+        if (deferred) showToast(summary, tone)
         // Navigation may rebuild the workspace surface; append after it settles.
-        setTimeout(() => showToast(summary, tone), 0)
+        else setTimeout(() => showToast(summary, tone), 0)
       } else {
         showToast(summary, tone)
       }
@@ -638,6 +689,21 @@ function Section(): React.ReactElement {
           if (target !== undefined) targets.push({ provider, session: target })
         }
       }
+      // A rebuild deletes and rewrites the log of an already-imported session;
+      // leave its view first so the open conversation is not left on a removed log.
+      const rebuilding = targets.find(({ session }) =>
+        session.branchChanged === true
+        && session.dshSessionId !== undefined
+        && isCurrentSession?.(session.dshSessionId) === true,
+      )
+      if (rebuilding?.session.dshSessionId !== undefined) {
+        const rebuiltIds = new Set(
+          targets
+            .map(({ session }) => session.dshSessionId)
+            .filter((id): id is string => id !== undefined),
+        )
+        moveToSurvivingSession?.(rebuilding.session.dshSessionId, rebuiltIds)
+      }
       const response = await fetch(`${API}/import-batch`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -647,6 +713,7 @@ function Section(): React.ReactElement {
             providerId: provider.id,
             providerName: provider.name,
             sourcePath: session.sourcePath,
+            sourceSessionId: session.sourceSessionId,
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.cwd === undefined ? {} : { cwd: session.cwd }),
             bytes: session.bytes,
@@ -1167,6 +1234,11 @@ function Section(): React.ReactElement {
             <p>
               将导入 {totalSelected} 个会话的完整历史。导入后会出现在左侧会话列表，可直接继续对话。
             </p>
+            {branchRebuildCount > 0 && (
+              <p>
+                其中 {branchRebuildCount} 个会话在源工具里被 rewind 分叉：会按最新分支重建 DSH 会话，被 rewind 掉的旧回合将被替换（源工具文件不受影响）。
+              </p>
+            )}
             <div className="dsi-dialog-actions">
               <button className="dsi-ghost" type="button" disabled={busy} onClick={() => setConfirming(false)}>取消</button>
               <button
@@ -1421,19 +1493,43 @@ export function apply(ctx: Context): () => void {
             return false
           }
         }
+  const fallbackSessionId = (removedId: string, exclude?: ReadonlySet<string>): string | undefined => {
+    try {
+      const snapshot = sessions?.list?.getSnapshot()
+      return snapshot?.ids.find(id => {
+        const row = snapshot.byId[id]
+        return id !== removedId && exclude?.has(id) !== true && row !== undefined && row.blank !== true
+          && row.parentSessionId === undefined && row.origin !== 'subagent'
+      })
+    } catch {
+      return undefined
+    }
+  }
   leaveCurrentSession = removedId => {
     const ui = get?.('uiWorkspace') as UiWorkspaceFace | undefined
     try {
-      const snapshot = sessions?.list?.getSnapshot()
-      const fallback = snapshot?.ids.find(id => {
-        const row = snapshot.byId[id]
-        return id !== removedId && row !== undefined && row.blank !== true
-          && row.parentSessionId === undefined && row.origin !== 'subagent'
-      })
-      if (fallback !== undefined && ui?.openSession !== undefined) ui.openSession(fallback)
-      else ui?.clearMain?.()
+      const fallback = fallbackSessionId(removedId)
+      if (fallback !== undefined && ui?.openSession !== undefined) {
+        ui.openSession(fallback)
+        return true
+      }
+      ui?.clearMain?.()
+      return false
     } catch (cause) {
       console.warn('[dsh-session-import] 关闭当前会话视图失败', cause)
+      return false
+    }
+  }
+  moveToSurvivingSession = (removedId, exclude) => {
+    const ui = get?.('uiWorkspace') as UiWorkspaceFace | undefined
+    const fallback = fallbackSessionId(removedId, exclude)
+    if (fallback === undefined || ui?.openSession === undefined) return false
+    try {
+      ui.openSession(fallback)
+      return true
+    } catch (cause) {
+      console.warn('[dsh-session-import] 切换会话视图失败', cause)
+      return false
     }
   }
   let disposed = false
@@ -1465,6 +1561,9 @@ export function apply(ctx: Context): () => void {
     forgetSession = undefined
     isCurrentSession = undefined
     leaveCurrentSession = undefined
+    moveToSurvivingSession = undefined
+    pendingLeave?.disconnect()
+    pendingLeave = undefined
     if (timer !== undefined) clearTimeout(timer)
     document.getElementById(STYLE_ID)?.remove()
   }

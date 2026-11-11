@@ -21,6 +21,7 @@ import {
   backfillTitles,
   dshHome,
   loadLiveRecords,
+  removeSessionDirectories,
   retractImport,
   runImport,
   scanProvider,
@@ -40,6 +41,7 @@ export const ROUTE_PREFIX = '/dsh-session-import'
 interface ImportBatchTarget {
   providerId: string
   sourcePath: string
+  sourceSessionId?: string
   providerName?: string
   title?: string
   cwd?: string
@@ -353,6 +355,12 @@ export function apply(ctx: Context): () => void {
     return () => {}
   }
 
+  // Rewind branches rewrite an existing import: remove the old log, then write
+  // the active branch under the same session id.
+  const deleteSession = async (sessionId: string): Promise<void> => {
+    await removeSessionDirectories(sessionId)
+  }
+
   const dispose = webServer.register({
     kind: 'prefix',
     path: ROUTE_PREFIX,
@@ -413,9 +421,12 @@ export function apply(ctx: Context): () => void {
           const result = await runImport(persistence, {
             providerId,
             sourcePath,
+            ...(typeof body.sourceSessionId === 'string' && body.sourceSessionId !== ''
+              ? { sourceSessionId: body.sourceSessionId }
+              : {}),
             options: importOptionsFrom(body),
             provider,
-          }, workspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict)
+          }, workspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict, deleteSession)
           sendJson(res, 200, { ok: result.status !== 'failed', result })
           return
         }
@@ -440,6 +451,9 @@ export function apply(ctx: Context): () => void {
             targets.push({
               providerId: item['providerId'],
               sourcePath: item['sourcePath'],
+              ...(typeof item['sourceSessionId'] === 'string' && item['sourceSessionId'] !== ''
+                ? { sourceSessionId: item['sourceSessionId'] }
+                : {}),
               ...(typeof item['providerName'] === 'string' ? { providerName: item['providerName'] } : {}),
               ...(typeof item['title'] === 'string' ? { title: item['title'] } : {}),
               ...(typeof item['cwd'] === 'string' ? { cwd: item['cwd'] } : {}),
@@ -484,9 +498,10 @@ export function apply(ctx: Context): () => void {
               result = await runImport(persistence, {
                 providerId: target.providerId,
                 sourcePath: target.sourcePath,
+                ...(target.sourceSessionId === undefined ? {} : { sourceSessionId: target.sourceSessionId }),
                 options,
                 provider,
-              }, serializedWorkspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict)
+              }, serializedWorkspace, projectionCache(), attachments(), retractRuntime.liveStatus, retractRuntime.evict, deleteSession)
             } catch (cause) {
               result = {
                 status: 'failed',

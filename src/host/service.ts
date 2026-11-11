@@ -2,6 +2,7 @@
  * Host-side service layer: provider discovery, session scanning, and the real
  * import run against DSH's own persistence.
  */
+import { createHash } from 'node:crypto'
 import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -57,10 +58,16 @@ interface HintCacheEntry {
   mtimeMs: number
   title?: string
   cwd?: string
+  /** Same first-line hash the import ledger fingerprints. */
+  headHash?: string
+  /** First human-turn UUID shared by rewind branches. */
+  lineageId?: string
+  /** Newest user/assistant message time, used to pick the active branch. */
+  lastMessageAt?: number
 }
 
 interface HintCache {
-  version: 1
+  version: 5
   entries: Record<string, HintCacheEntry>
 }
 
@@ -75,14 +82,14 @@ async function loadHintCache(): Promise<HintCache> {
   if (hintCache !== undefined) return hintCache
   try {
     const raw = JSON.parse(await readFile(hintCacheFile(), 'utf8')) as Partial<HintCache>
-    if (raw.version === 1 && raw.entries !== null && typeof raw.entries === 'object') {
+    if (raw.version === 5 && raw.entries !== null && typeof raw.entries === 'object') {
       hintCache = raw as HintCache
       return hintCache
     }
   } catch {
     // First run or an unreadable cache: start empty.
   }
-  hintCache = { version: 1, entries: {} }
+  hintCache = { version: 5, entries: {} }
   return hintCache
 }
 
@@ -137,6 +144,24 @@ export interface ScannedSession {
   cwd?: string
   /** Project-directory creation time; the picker orders workspaces by it. */
   createdAtMs?: number
+  /** The active source branch differs from the imported one; re-import rebuilds. */
+  branchChanged?: boolean
+}
+
+/** Compare source paths the way Windows does (case-insensitive, either slash). */
+function normalizeSourcePath(value: string): string {
+  return value.replace(/\\/g, '/').toLowerCase()
+}
+
+function sameSourcePath(left: string, right: string): boolean {
+  return normalizeSourcePath(left) === normalizeSourcePath(right)
+}
+
+/** One scanned transcript; lineage fields are scan-internal. */
+interface PendingScan extends ScannedSession {
+  lineageId?: string
+  lastMessageAt?: number
+  record?: ImportRecord
 }
 
 /**
@@ -149,18 +174,26 @@ export async function scanProvider(
 ): Promise<ScannedSession[]> {
   const glob = provider.assets.sessions?.layout.sessionGlob ?? '*/*.jsonl'
   const depth = glob.split('/').length - 1
-  const out: ScannedSession[] = []
+  const entries: PendingScan[] = []
   const roots = rootsFor(provider)
+  // A rebuilt rewind branch keeps the ledger identity of the branch that was
+  // first imported, so the active file is bound by its recorded path too.
+  const recordsByPath = new Map<string, ImportRecord>()
+  for (const record of Object.values(records)) {
+    if (record.providerId !== provider.id) continue
+    recordsByPath.set(normalizeSourcePath(record.sourcePath), record)
+  }
   const cache = await loadHintCache()
   const seen = new Set<string>()
   let cacheDirty = false
   let enumerationComplete = true
 
+  const tasks: Array<{ file: string; dir: string; createdAtMs: number }> = []
   for (const root of roots) {
     let dirs: string[]
     try {
-      const entries = await readdir(root, { withFileTypes: true })
-      dirs = entries.filter(entry => entry.isDirectory()).map(entry => join(root, entry.name))
+      const rootEntries = await readdir(root, { withFileTypes: true })
+      dirs = rootEntries.filter(entry => entry.isDirectory()).map(entry => join(root, entry.name))
     } catch {
       enumerationComplete = false
       continue
@@ -173,47 +206,88 @@ export async function scanProvider(
       } catch {
         createdAtMs = 0
       }
-      let files: string[]
       try {
-        const entries = await readdir(dir, { withFileTypes: true })
-        files = entries.filter(entry => entry.isFile() && entry.name.endsWith('.jsonl')).map(entry => join(dir, entry.name))
+        const dirEntries = await readdir(dir, { withFileTypes: true })
+        for (const entry of dirEntries) {
+          if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+            tasks.push({ file: join(dir, entry.name), dir, createdAtMs })
+          }
+        }
       } catch {
         enumerationComplete = false
-        continue
       }
-      await forEachConcurrent(files, SCAN_CONCURRENCY, async file => {
+    }
+  }
+
+  // A rebuilt rewind branch keeps the ledger identity of the branch that was
+  // first imported; when its recorded path is present it owns the record, and
+  // the abandoned branch carrying the same session id must not claim it.
+  const scannedPaths = new Set(tasks.map(task => normalizeSourcePath(task.file)))
+  const recordedPaths = new Set<string>()
+  for (const record of recordsByPath.values()) {
+    const key = normalizeSourcePath(record.sourcePath)
+    if (scannedPaths.has(key)) recordedPaths.add(key)
+  }
+
+  await forEachConcurrent(tasks, SCAN_CONCURRENCY, async ({ file, dir, createdAtMs }) => {
         try {
           const info = await stat(file)
           const snapshot = { bytes: info.size, mtimeMs: info.mtimeMs }
           const sessionId = basename(file, '.jsonl')
-          const record = records[recordKey(provider.id, sessionId)]
-          const status: ScannedSession['status'] =
-            record === undefined
-              ? 'new'
-              : record.status === 'failed'
-                ? 'failed'
-                : record.fingerprint.bytes === snapshot.bytes && record.fingerprint.mtimeMs === snapshot.mtimeMs
-                  ? 'imported'
-                  : 'grown'
+          const pathRecord = recordsByPath.get(normalizeSourcePath(file))
+          const idRecord = records[recordKey(provider.id, sessionId)]
+          const record = pathRecord
+            ?? (idRecord !== undefined && !recordedPaths.has(normalizeSourcePath(idRecord.sourcePath)) ? idRecord : undefined)
           seen.add(file)
           const cached = cache.entries[file]
-          let hint: { title?: string; cwd?: string }
+          let hint: {
+            title?: string
+            cwd?: string
+            headHash?: string
+            lineageId?: string
+            lastMessageAt?: number
+          }
           if (cached !== undefined && cached.bytes === snapshot.bytes && cached.mtimeMs === snapshot.mtimeMs) {
             hint = {
               ...(cached.title === undefined ? {} : { title: cached.title }),
               ...(cached.cwd === undefined ? {} : { cwd: cached.cwd }),
+              ...(cached.headHash === undefined ? {} : { headHash: cached.headHash }),
+              ...(cached.lineageId === undefined ? {} : { lineageId: cached.lineageId }),
+              ...(cached.lastMessageAt === undefined ? {} : { lastMessageAt: cached.lastMessageAt }),
             }
           } else {
             hint = await readSessionHint(file)
             cache.entries[file] = { bytes: snapshot.bytes, mtimeMs: snapshot.mtimeMs, ...hint }
             cacheDirty = true
           }
-          const ignored = provider.assets.sessions?.ignore?.titlePrefixes?.some(
+          // Source tools rewrite metadata records (titles, last-prompt) in place,
+          // so an mtime-only change is not "grown" when bytes and the transcript
+          // head still match the imported fingerprint.
+          const contentUnchanged = record !== undefined
+            && record.fingerprint.bytes === snapshot.bytes
+            && (record.fingerprint.mtimeMs === snapshot.mtimeMs
+              || (hint.headHash !== undefined && record.fingerprint.headHash === hint.headHash))
+          const status: ScannedSession['status'] =
+            record === undefined
+              ? 'new'
+              : record.status === 'failed'
+                ? 'failed'
+                : contentUnchanged
+                  ? 'imported'
+                  : 'grown'
+          const ignore = provider.assets.sessions?.ignore
+          const ignored = ignore?.titlePrefixes?.some(
             prefix => hint.title?.startsWith(prefix) === true,
-          )
+          ) === true || ignore?.sessions?.some(rule => {
+            if (rule.cwdContains === undefined && rule.title === undefined) return false
+            const cwdHit = rule.cwdContains === undefined
+              || hint.cwd?.toLowerCase().includes(rule.cwdContains.toLowerCase()) === true
+            const titleHit = rule.title === undefined || hint.title === rule.title
+            return cwdHit && titleHit
+          }) === true
           // Keep already-imported records visible so their retract entry survives.
-          if (ignored === true && record === undefined) return
-          out.push({
+          if (ignored && record === undefined) return
+          entries.push({
             providerId: provider.id,
             sourcePath: file,
             sourceSessionId: sessionId,
@@ -225,13 +299,14 @@ export async function scanProvider(
             ...(hint.title === undefined ? {} : { title: hint.title }),
             ...(hint.cwd === undefined ? {} : { cwd: hint.cwd }),
             ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
+            ...(hint.lineageId === undefined ? {} : { lineageId: hint.lineageId }),
+            ...(hint.lastMessageAt === undefined ? {} : { lastMessageAt: hint.lastMessageAt }),
+            ...(record === undefined ? {} : { record }),
           })
         } catch {
           // ignore unreadable entries
         }
-      })
-    }
-  }
+  })
 
   if (enumerationComplete) {
     for (const key of Object.keys(cache.entries)) {
@@ -243,24 +318,90 @@ export async function scanProvider(
   }
   if (cacheDirty) persistHintCache()
 
-  return out.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  // Claude Code rewinds fork the conversation into a new transcript that copies
+  // the leading turns. The source tool shows only the active branch, so the
+  // picker does too: one row per lineage, pointing at the newest branch while
+  // staying bound to the ledger record of the branch that was imported.
+  const groups = new Map<string, PendingScan[]>()
+  const rows: PendingScan[] = []
+  for (const entry of entries) {
+    if (entry.lineageId === undefined) {
+      rows.push(entry)
+      continue
+    }
+    const key = `${entry.providerId}\u0000${entry.lineageId}`
+    const list = groups.get(key)
+    if (list === undefined) groups.set(key, [entry])
+    else list.push(entry)
+  }
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      rows.push(group[0]!)
+      continue
+    }
+    const ordered = [...group].sort(
+      (a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || b.mtimeMs - a.mtimeMs,
+    )
+    const active = ordered[0]!
+    const imported = group.filter(entry => entry.record !== undefined)
+    // Never hide imported rows: without one active record per lineage the
+    // grouping would strand a retract entry, so keep the raw rows.
+    if (imported.length === 0) {
+      rows.push(active)
+      continue
+    }
+    if (imported.length > 1) {
+      rows.push(...group)
+      continue
+    }
+    const record = imported[0]!.record!
+    // The logical id stays on the branch that owns the ledger record; the path
+    // is what moves when a rewind forks the conversation.
+    const branchChanged = !sameSourcePath(record.sourcePath, active.sourcePath)
+    rows.push({
+      ...active,
+      sourceSessionId: record.sourceSessionId,
+      dshSessionId: record.dshSessionId,
+      status: branchChanged ? 'grown' : active.status,
+      ...(branchChanged ? { branchChanged: true } : {}),
+    })
+  }
+
+  return rows
+    .map(({ lineageId: _lineageId, lastMessageAt: _lastMessageAt, record: _record, ...row }) => row)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
 }
 
 /**
  * Cheap picker metadata: the source tool's own title (or first human message)
  * plus the workspace cwd, so the panel can group sessions by project the way
- * the source tool's sidebar does. Only the head of the file is read, so a
- * 60 MB transcript does not slow the list down.
+ * the source tool's sidebar does. Head plus a small tail is read — Claude Code
+ * writes its `ai-title` and sometimes the first prompt at the end of a long
+ * transcript — while a 60 MB log still does not slow the list down.
  */
-export async function readSessionHint(file: string): Promise<{ title?: string; cwd?: string }> {
+export async function readSessionHint(file: string): Promise<{
+  title?: string
+  cwd?: string
+  headHash?: string
+  lineageId?: string
+  lastMessageAt?: number
+}> {
   const HEAD_BYTES = 256 * 1024
+  const TAIL_BYTES = 64 * 1024
   let text = ''
   try {
     const handle = await open(file, 'r')
     try {
-      const buffer = Buffer.alloc(HEAD_BYTES)
-      const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0)
-      text = buffer.subarray(0, bytesRead).toString('utf8')
+      const info = await handle.stat()
+      const head = Buffer.alloc(Math.min(HEAD_BYTES, info.size))
+      const { bytesRead } = await handle.read(head, 0, head.length, 0)
+      text = head.subarray(0, bytesRead).toString('utf8')
+      if (info.size > HEAD_BYTES) {
+        const tailStart = Math.max(HEAD_BYTES, info.size - TAIL_BYTES)
+        const tail = Buffer.alloc(info.size - tailStart)
+        const tailRead = await handle.read(tail, 0, tail.length, tailStart)
+        text += '\n' + tail.subarray(0, tailRead.bytesRead).toString('utf8')
+      }
     } finally {
       await handle.close()
     }
@@ -268,8 +409,19 @@ export async function readSessionHint(file: string): Promise<{ title?: string; c
     return {}
   }
 
-  let title: string | undefined
+  // Same first-line hash as `fingerprintSource`, so an mtime-only rewrite can be
+  // recognized without reading the whole transcript.
+  const firstLine = (text.split('\n', 1)[0] ?? '').replace(/\r$/, '')
+  const headHash = createHash('sha256').update(firstLine.slice(0, 4096)).digest('hex').slice(0, 16)
+
+  // The import parser prefers aiTitle/customTitle anywhere in the file (Claude
+  // Code writes an `ai-title` record after the first turn); the picker must use
+  // the same precedence or the imported title differs from the scanned one.
+  let fieldTitle: string | undefined
+  let userTitle: string | undefined
   let cwd: string | undefined
+  let lineageId: string | undefined
+  let lastMessageAt: number | undefined
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue
     let record: Record<string, unknown>
@@ -278,6 +430,16 @@ export async function readSessionHint(file: string): Promise<{ title?: string; c
     } catch {
       continue
     }
+    if (lineageId === undefined && record['type'] === 'user' && typeof record['uuid'] === 'string') {
+      lineageId = record['uuid']
+    }
+    if (record['type'] === 'user' || record['type'] === 'assistant') {
+      const stamp = record['timestamp']
+      const time = typeof stamp === 'number'
+        ? stamp
+        : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
+      if (Number.isFinite(time) && (lastMessageAt === undefined || time > lastMessageAt)) lastMessageAt = time
+    }
     if (cwd === undefined) {
       if (record['type'] === 'workspace-directories') {
         const dirs = record['directories']
@@ -285,16 +447,16 @@ export async function readSessionHint(file: string): Promise<{ title?: string; c
       }
       if (cwd === undefined && typeof record['cwd'] === 'string') cwd = record['cwd']
     }
-    if (title === undefined) {
+    if (fieldTitle === undefined) {
       for (const field of ['aiTitle', 'customTitle', 'title']) {
         const value = record[field]
         if (typeof value === 'string' && value.trim() !== '') {
-          title = value.trim().slice(0, 80)
+          fieldTitle = value.trim().slice(0, 80)
           break
         }
       }
     }
-    if (title === undefined && record['type'] === 'user') {
+    if (userTitle === undefined && record['type'] === 'user') {
       const message = record['message'] as { content?: unknown } | undefined
       const content = message?.content
       let raw: string | undefined
@@ -303,11 +465,18 @@ export async function readSessionHint(file: string): Promise<{ title?: string; c
         const first = content.find(block => (block as { type?: string })?.type === 'text') as { text?: string } | undefined
         if (typeof first?.text === 'string') raw = first.text
       }
-      if (raw !== undefined) title = cleanTitleText(raw)
+      if (raw !== undefined) userTitle = cleanTitleText(raw)
     }
-    if (title !== undefined && cwd !== undefined) break
+    if (fieldTitle !== undefined && cwd !== undefined && lineageId !== undefined && lastMessageAt !== undefined) break
   }
-  return { ...(title === undefined ? {} : { title }), ...(cwd === undefined ? {} : { cwd }) }
+  const title = fieldTitle ?? userTitle
+  return {
+    headHash,
+    ...(title === undefined ? {} : { title }),
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(lineageId === undefined ? {} : { lineageId }),
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
+  }
 }
 
 /**
@@ -391,6 +560,26 @@ export async function retractImport(
     await runtime.evict(record.dshSessionId)
   }
 
+  const removedPaths = await removeSessionDirectories(record.dshSessionId)
+
+  await (workspace === undefined
+    ? detachSessionFromWorkspaces(dshHome(), record.dshSessionId)
+    : workspace.detach(record.dshSessionId))
+  await store.remove(providerId, sourceSessionId)
+  return {
+    providerId,
+    sourceSessionId,
+    dshSessionId: record.dshSessionId,
+    removedPaths,
+    evicted: status !== undefined,
+  }
+}
+
+/** Remove an imported session's log from every project directory. */
+export async function removeSessionDirectories(dshSessionId: string): Promise<string[]> {
+  if (!dshSessionId.startsWith('import-')) {
+    throw new Error(`拒绝删除非本插件创建的会话：${dshSessionId}`)
+  }
   const removedPaths: string[] = []
   const sessionsRoot = join(dshHome(), 'sessions')
   let projectDirs: string[] = []
@@ -403,7 +592,7 @@ export async function retractImport(
   }
 
   for (const projectDir of projectDirs) {
-    const candidate = join(projectDir, record.dshSessionId)
+    const candidate = join(projectDir, dshSessionId)
     let info
     try {
       info = await stat(candidate)
@@ -419,18 +608,7 @@ export async function retractImport(
     }
     removedPaths.push(candidate)
   }
-
-  await (workspace === undefined
-    ? detachSessionFromWorkspaces(dshHome(), record.dshSessionId)
-    : workspace.detach(record.dshSessionId))
-  await store.remove(providerId, sourceSessionId)
-  return {
-    providerId,
-    sourceSessionId,
-    dshSessionId: record.dshSessionId,
-    removedPaths,
-    evicted: status !== undefined,
-  }
+  return removedPaths
 }
 
 /**
@@ -535,6 +713,11 @@ export function dshHome(): string {
 export interface ImportRequest {
   providerId: string
   sourcePath: string
+  /**
+   * Logical session id. A rewind branch row carries the id of the branch that
+   * owns the ledger record, so the rebuilt log keeps the same DSH identity.
+   */
+  sourceSessionId?: string
   options: ImportOptions
   /** Provider rules for local file links; absent means leave source text as-is. */
   provider?: ProviderDescriptor
@@ -637,13 +820,19 @@ export async function runImport(
   attachments?: AttachmentsFace,
   liveStatus?: (sessionId: string) => string | undefined,
   evictLive?: (sessionId: string) => Promise<void>,
+  deleteSession?: (sessionId: string) => Promise<void>,
 ): Promise<ImportResult> {
   const parsed = await parseClaudeJsonl(request.sourcePath, {
     providerId: request.providerId,
   })
   const adapted = adaptFileLinks(parsed.events, request.provider?.fileLinks?.assistant, parsed.cwd)
-  const session: ParsedSession =
-    adapted.links === 0 ? parsed : { ...parsed, events: adapted.events }
+  const logicalId = request.sourceSessionId === undefined || request.sourceSessionId === ''
+    ? parsed.sourceSessionId
+    : request.sourceSessionId
+  const session: ParsedSession = {
+    ...(adapted.links === 0 ? parsed : { ...parsed, events: adapted.events }),
+    sourceSessionId: logicalId,
+  }
   if (adapted.links > 0) {
     console.info(
       `[dsh-session-import] 文件链接: ${adapted.links} 处 -> ${adapted.files} 个文件（${session.sourceSessionId}）`,
@@ -657,6 +846,7 @@ export async function runImport(
       ...(attachments === undefined ? {} : { images: createImageResolver(attachments) }),
       ...(liveStatus === undefined ? {} : { liveStatus }),
       ...(evictLive === undefined ? {} : { evictLive }),
+      ...(deleteSession === undefined ? {} : { deleteSession }),
     },
     session,
     request.options,

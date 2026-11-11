@@ -126,12 +126,33 @@
         "ignore": {
           "type": "object",
           "additionalProperties": false,
-          "description": "机器遥测类转录（插件上报、回执）不当作可导入会话",
+          "description": "机器遥测、内部探针类转录不当作可导入会话",
           "properties": {
             "titlePrefixes": {
               "type": "array",
               "items": { "type": "string", "minLength": 1 },
               "description": "解析出的标题以这些前缀开头时忽略该转录"
+            },
+            "sessions": {
+              "type": "array",
+              "description": "按会话元数据忽略；一条规则内所有条件需同时满足",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "properties": {
+                  "cwdContains": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "会话 cwd 包含该子串（忽略大小写）"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "会话标题完全等于该值"
+                  }
+                }
+              }
             }
           }
         }

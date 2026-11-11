@@ -24,6 +24,14 @@ export interface ProviderLayout {
   subagentGlob?: string
 }
 
+/** One machine-only session rule; every declared condition must match. */
+export interface SessionIgnoreRule {
+  /** Case-insensitive substring of the session cwd (workspace path). */
+  cwdContains?: string
+  /** Exact picker title. */
+  title?: string
+}
+
 /** Conversation asset: where transcripts live and how to read their metadata. */
 export interface SessionAsset {
   roots: ProviderRoots
@@ -31,10 +39,10 @@ export interface SessionAsset {
   cwd?: { from?: string }
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
   /**
-   * Machine-only transcripts (plugin telemetry, acks) that the picker hides.
-   * Matched on the parsed title so no provider id branch is needed.
+   * Machine-only transcripts (plugin telemetry, acks, internal probes) that the
+   * picker hides. Matched on picker metadata so no provider id branch is needed.
    */
-  ignore?: { titlePrefixes?: string[] }
+  ignore?: { titlePrefixes?: string[]; sessions?: SessionIgnoreRule[] }
 }
 
 /** A local file syntax a provider writes into assistant text. */
@@ -120,6 +128,8 @@ export interface ParsedSession {
   sourceSessionId: string
   providerId: string
   sourcePath: string
+  /** First human-turn UUID; rewind branches of one conversation share it. */
+  lineageId?: string
   cwd?: string
   title?: string
   startedAt?: number
@@ -159,6 +169,8 @@ export interface ImportRecord {
   providerId: string
   sourceSessionId: string
   sourcePath: string
+  /** First human-turn UUID; binds rewind branches to one imported session. */
+  lineageId?: string
   fingerprint: { bytes: number; mtimeMs: number; headHash: string }
   dshSessionId: string
   importedTurns: number
@@ -187,4 +199,6 @@ export interface ImportResult {
   truncated: number
   repaired: number
   message?: string
+  /** True when the DSH session was rewritten from a newer rewind branch. */
+  rebuilt?: boolean
 }

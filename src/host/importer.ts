@@ -91,6 +91,8 @@ export interface ImportDeps {
   liveStatus?: (sessionId: string) => string | undefined
   /** Tear down a resident session so the append can take the write handle. */
   evictLive?: (sessionId: string) => Promise<void>
+  /** Remove an imported session's log so a rewind branch can be rebuilt. */
+  deleteSession?: (sessionId: string) => Promise<void>
   now?: () => number
 }
 
@@ -213,6 +215,40 @@ export async function fingerprintSource(path: string): Promise<SourceFingerprint
   return fingerprintOf(info.size, info.mtimeMs, await readHead(path))
 }
 
+/** Compare source paths the way Windows does (case-insensitive, either slash). */
+function sameSourcePath(left: string, right: string): boolean {
+  const norm = (value: string): string => value.replace(/\\/g, '/').toLowerCase()
+  return norm(left) === norm(right)
+}
+
+/** First user-turn UUID, read cheaply from the transcript head. */
+async function readLineageId(path: string): Promise<string | undefined> {
+  try {
+    const stream = createReadStream(path, { encoding: 'utf8' })
+    const lines = createInterface({ input: stream, crlfDelay: Infinity })
+    try {
+      let seen = 0
+      for await (const line of lines) {
+        seen += 1
+        if (seen > 500) break
+        if (line.trim() === '') continue
+        try {
+          const record = JSON.parse(line) as { type?: string; uuid?: unknown }
+          if (record.type === 'user' && typeof record.uuid === 'string') return record.uuid
+        } catch {
+          // skip malformed lines the parser also tolerates
+        }
+      }
+      return undefined
+    } finally {
+      lines.close()
+      stream.destroy()
+    }
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Hash the leading events of a mapped log. Two mappings of the same source
  * produce the same prefix; a slid window does not.
@@ -313,6 +349,45 @@ export async function importSession(
         }
       }
     }
+
+    // Claude Code rewinds fork the conversation into a new transcript that
+    // copies the shared turns, leaving the ledger on the abandoned branch.
+    // Appending would keep the dropped turns, so rewrite the DSH session from
+    // the active branch instead.
+    if (!sameSourcePath(existing.sourcePath, parsed.sourcePath) && deps.deleteSession !== undefined) {
+      const expected = existing.lineageId
+      const observed = parsed.lineageId
+      const lineageOk = expected !== undefined && observed !== undefined
+        ? expected === observed
+        : observed !== undefined && (await readLineageId(existing.sourcePath)) === observed
+      if (lineageOk) {
+        try {
+          await deps.deleteSession(existing.dshSessionId)
+          await deps.state.remove(parsed.providerId, existing.sourceSessionId)
+          const rebuilt = await importSession(deps, parsed, options, signal)
+          if (rebuilt.status !== 'imported') return rebuilt
+          return {
+            ...rebuilt,
+            rebuilt: true,
+            message: `已按最新分支重建（${mapped.turns} 轮 / ${mapped.events.length} 条事件）`,
+          }
+        } catch (cause) {
+          await deps.state.upsert({ ...existing, lastImportAt: now(), status: 'failed' })
+          return {
+            status: 'failed',
+            providerId: parsed.providerId,
+            sourceSessionId: parsed.sourceSessionId,
+            dshSessionId: existing.dshSessionId,
+            turns: 0,
+            events: 0,
+            truncated: mapped.truncated,
+            repaired: mapped.repairedCalls,
+            message: `按最新分支重建失败：${cause instanceof Error ? cause.message : String(cause)}`,
+          }
+        }
+      }
+    }
+
     let previous = existing.importedEventCount
     let previousHash = existing.prefixHash
     let cursor = 0
@@ -371,7 +446,12 @@ export async function importSession(
     }
 
     if (mapped.events.length <= previous) {
-      await deps.state.upsert({ ...existing, fingerprint, lastImportAt: now() })
+      await deps.state.upsert({
+        ...existing,
+        ...(existing.lineageId === undefined && parsed.lineageId !== undefined ? { lineageId: parsed.lineageId } : {}),
+        fingerprint,
+        lastImportAt: now(),
+      })
       return {
         status: 'skipped',
         providerId: parsed.providerId,
@@ -445,6 +525,7 @@ export async function importSession(
 
     await deps.state.upsert({
       ...existing,
+      ...(existing.lineageId === undefined && parsed.lineageId !== undefined ? { lineageId: parsed.lineageId } : {}),
       fingerprint,
       importedTurns: mapped.turns,
       importedEventCount: previous + tail.length,
@@ -516,6 +597,7 @@ export async function importSession(
     providerId: parsed.providerId,
     sourceSessionId: parsed.sourceSessionId,
     sourcePath: parsed.sourcePath,
+    ...(parsed.lineageId === undefined ? {} : { lineageId: parsed.lineageId }),
     fingerprint,
     dshSessionId: sessionId,
     importedTurns: mapped.turns,

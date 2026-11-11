@@ -284,6 +284,7 @@ export async function parseClaudeJsonl(
   let sessionId: string | undefined
   let cwd: string | undefined
   let title: string | undefined
+  let lineageId: string | undefined
 
   const stream = createReadStream(sourcePath, { encoding: 'utf8' })
   const lines = createInterface({ input: stream, crlfDelay: Infinity })
@@ -307,6 +308,11 @@ export async function parseClaudeJsonl(
     }
     if (typeof record.sessionId === 'string' && sessionId === undefined) {
       sessionId = record.sessionId
+    }
+    // Rewind branches copy the conversation head verbatim, so the first user
+    // record's UUID is the same across every branch of one conversation.
+    if (lineageId === undefined && record.type === 'user' && typeof record.uuid === 'string') {
+      lineageId = record.uuid
     }
     if (record.type === 'workspace-directories') {
       const dirs = (record as { directories?: unknown }).directories
@@ -467,6 +473,7 @@ export async function parseClaudeJsonl(
     sourceSessionId: sessionId ?? basename(sourcePath, '.jsonl'),
     providerId: options.providerId,
     sourcePath,
+    ...(lineageId === undefined ? {} : { lineageId }),
     cwd,
     title,
     startedAt,
