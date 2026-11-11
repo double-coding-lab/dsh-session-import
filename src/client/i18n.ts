@@ -46,6 +46,8 @@ const EN: Record<string, string> = {
   '正在扫描本机会话': 'Scanning local sessions',
   '最近任务': 'Recent tasks',
   '项目': 'Project',
+  '全选匹配的会话': 'Select all matching sessions',
+  '全选该工作区': 'Select all in this workspace',
   '未命名会话': 'Untitled session',
   '未导入': 'Not imported',
   '已导入': 'Imported',
