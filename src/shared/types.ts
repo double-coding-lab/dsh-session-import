@@ -8,7 +8,7 @@
  */
 
 /** Format family — selects the parser implementation. */
-export type SourceFamily = 'claude-jsonl' | 'codex-jsonl' | 'codex-db'
+export type SourceFamily = 'claude-jsonl' | 'codex-jsonl' | 'codex-db' | 'workbuddy-jsonl'
 
 /** Per-platform candidate root directories, `~` allowed. */
 export interface ProviderRoots {
@@ -48,6 +48,8 @@ export interface SessionAsset {
   roots: ProviderRoots
   layout: ProviderLayout
   cwd?: { from?: string }
+  /** Supplemental read-only SQLite with session titles and grouping (WorkBuddy). */
+  metadata?: { database?: string }
   title?: { fields?: string[]; fromFirstUserMessage?: boolean }
   /**
    * How transcripts of one logical conversation relate:
@@ -220,6 +222,8 @@ export interface ImportRecord {
   prefixHash: string
   /** Hash of the mapped events just before the append cursor; detects parser drift. */
   boundaryHash?: string
+  /** Last real message time in the imported window; metadata rewrites do not change it. */
+  lastMessageAt?: number
   importedAt: number
   lastImportAt: number
   status: 'ok' | 'partial' | 'failed'

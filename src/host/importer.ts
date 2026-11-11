@@ -329,6 +329,15 @@ async function readLineageId(path: string): Promise<string | undefined> {
   }
 }
 
+/** Timestamp of the last human/AI message, ignoring tool-result tails. */
+function lastMessageTime(events: readonly SourceEvent[]): number | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.kind === 'user' || event?.kind === 'assistant') return event.time
+  }
+  return undefined
+}
+
 /**
  * Hash the leading events of a mapped log. Two mappings of the same source
  * produce the same prefix; a slid window does not.
@@ -361,6 +370,7 @@ export async function importSession(
   // Database-backed sources have no stat-able file; their parser fingerprints
   // the finished items it read instead.
   const fingerprint = parsed.fingerprint ?? await fingerprintSource(parsed.sourcePath)
+  const lastMessageAt = lastMessageTime(parsed.events)
   const key = recordKey(parsed.providerId, parsed.sourceSessionId)
 
   const records = await deps.state.load()
@@ -626,6 +636,7 @@ export async function importSession(
       importedEventCount: previous + tail.length,
       prefixHash: prefixHashOf(mapped.events, Math.min(64, previous + tail.length)),
       boundaryHash: boundaryHashOf(mapped.events, mapped.events.length),
+      ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
       lastImportAt: now(),
       status: 'ok',
     })
@@ -700,6 +711,7 @@ export async function importSession(
     importedEventCount: rebased.length,
     prefixHash: prefixHashOf(rebased, Math.min(64, rebased.length)),
     boundaryHash: boundaryHashOf(rebased, rebased.length),
+    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
     importedAt: now(),
     lastImportAt: now(),
     status: 'ok',

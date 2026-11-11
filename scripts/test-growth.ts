@@ -10,8 +10,9 @@ import { join } from 'node:path'
 
 import { importSession, prefixHashOf, type PersistencePort, type SessionHandle } from '../src/host/importer.ts'
 import { parseClaudeJsonl } from '../src/host/parsers/claude-jsonl.ts'
+import { sourceContentUnchanged } from '../src/host/service.ts'
 import { ImportStateStore } from '../src/host/state.ts'
-import { DEFAULT_IMPORT_OPTIONS } from '../src/shared/types.ts'
+import { DEFAULT_IMPORT_OPTIONS, type ImportRecord } from '../src/shared/types.ts'
 import type { DshEvent } from '../src/host/mapper.ts'
 
 const SESSION = 'fixture-growth'
@@ -103,6 +104,33 @@ if (first.status !== 'imported') problems.push(`首次应为 imported，实际 $
 if (second.status !== 'imported') problems.push(`增量应为 imported，实际 ${second.status}`)
 if (second.events <= 0) problems.push('增量应写入新事件')
 if (total !== 0 && total <= (first.events ?? 0)) problems.push('追加后总事件数没有增长')
+
+const record = {
+  providerId: 'qoder',
+  sourceSessionId: SESSION,
+  sourcePath: source,
+  fingerprint: { bytes: 100, mtimeMs: 1, headHash: 'head' },
+  dshSessionId: 'dsh',
+  importedTurns: 1,
+  importedEventCount: 1,
+  prefixHash: 'prefix',
+  importedAt: 1000,
+  lastImportAt: 1000,
+  status: 'ok',
+} satisfies ImportRecord
+const changedSnapshot = { bytes: 120, mtimeMs: 2 }
+if (!sourceContentUnchanged(record, changedSnapshot, 'head', 500)) {
+  problems.push('旧账本在仅改元数据时不应标记有新增')
+}
+if (sourceContentUnchanged(record, changedSnapshot, 'head', 1500)) {
+  problems.push('旧账本在新增真实消息后应标记有新增')
+}
+if (!sourceContentUnchanged({ ...record, lastMessageAt: 500 }, changedSnapshot, 'head', 500)) {
+  problems.push('记录最后消息时间一致时不应标记有新增')
+}
+if (sourceContentUnchanged({ ...record, lastMessageAt: 500 }, changedSnapshot, 'head', 600)) {
+  problems.push('记录最后消息时间落后时应标记有新增')
+}
 
 await rm(dir, { recursive: true, force: true })
 

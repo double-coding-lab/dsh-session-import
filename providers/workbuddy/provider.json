@@ -1,0 +1,26 @@
+{
+  "$schema": "../../schema/provider.schema.json",
+  "schemaVersion": 1,
+  "id": "workbuddy",
+  "name": "WorkBuddy",
+  "icon": "icon.png",
+  "family": "workbuddy-jsonl",
+  "assets": {
+    "sessions": {
+      "roots": {
+        "win32": ["~/.workbuddy/projects"],
+        "darwin": ["~/.workbuddy/projects"],
+        "linux": ["~/.workbuddy/projects"]
+      },
+      "layout": { "sessionGlob": "*/*.jsonl" },
+      "metadata": { "database": "~/.workbuddy/workbuddy.db" },
+      "title": { "fields": ["aiTitle"], "fromFirstUserMessage": true }
+    }
+  },
+  "fileLinks": {
+    "assistant": [
+      { "syntax": "markdown-link", "accept": ["absolute-path"] }
+    ]
+  },
+  "capabilities": { "resume": true, "images": true, "subagents": false, "reasoning": true }
+}

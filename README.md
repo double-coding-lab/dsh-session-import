@@ -2,7 +2,7 @@
 
 把第三方 AI 编程工具的会话历史，导入成 DeepSeek Harness 的原生会话——**能浏览、能搜索、能直接接着聊**。
 
-> 当前状态：Qoder / Claude Code / Codex 已打通端到端（扫描 → 导入 → 续聊 → 增量 → 撤回）。见 [技术方案](docs/技术方案.md)。
+> 当前状态：Qoder / Claude Code / Codex / WorkBuddy 已打通端到端（扫描 → 导入 → 续聊 → 增量 → 撤回）。见 [技术方案](docs/技术方案.md)。
 
 ## 它解决什么
 
@@ -15,7 +15,7 @@
 | Qoder | ✅ | `~/.qoder/projects/*/*.jsonl` |
 | Claude Code | ✅ | `~/.claude/projects/*/*.jsonl` |
 | Codex | ✅ | `~/.codex/state_5.sqlite` + `~/.codex/thread_history_1.sqlite`（按桌面项目分组，只导入已完成回合） |
-| WorkBuddy | ⏳ | 待补 provider 描述（纯数据，无需改代码） |
+| WorkBuddy | ✅ | `~/.workbuddy/projects/*/*.jsonl`（标题/空间来自 `workbuddy.db`；快速任务归入「最近任务」） |
 
 ## 安装
 
@@ -32,6 +32,8 @@ dsh plugin --profile web add link:<本仓库路径>
 1. 顶部搜索工作区或会话，展开应用 → 工作区，勾选要搬的会话（应用和工作区都支持全选）
 2. 点「导入」→ 确认弹窗 → 完成后左侧列表出现该会话
 3. 底部实时显示「已选 X 个会话 · Y 个工作区」；「清除选择」重置勾选，「导出日志」下载上一次导入报告
+
+临时单会话（cwd 缺失、Qoder/Codex scratch 目录、WorkBuddy 无项目的快速任务）统一显示在「最近任务」，导入后进入 DSH「未分组」，不会创建空工作区。
 
 状态徽标：`未导入` / `已导入` / `有新增` / `失败`。已导入的行有「撤回」。
 
@@ -96,7 +98,7 @@ src/
     state.ts            幂等台账（<DSH_HOME>/session-import/state.json）
     mapper.ts           源事件 → DSH v4 事件（turn/step/tool 状态机）
     file-links.ts       按 provider 规则识别本地文件链接，改成 DSH 原生文件 chip
-    parsers/            按 family 分的解析器（claude-jsonl）
+    parsers/            按 family 分的解析器（claude-jsonl / codex-jsonl / codex-db / workbuddy-jsonl）
 providers/<id>/provider.json   纯数据：会话在哪、怎么解析、文件链接怎么写
 fixtures/                       自检样本（含孤儿调用与压缩点）
 ```
@@ -114,9 +116,12 @@ fixtures/                       自检样本（含孤儿调用与压缩点）
 ## 已知限制
 
 - 增量追加要求源窗口前缀未变；前移后会提示先撤回再导
+- WorkBuddy 项目名只存在云端；插件读取 `~/.dsh/session-import/workbuddy-projects.json`（`{"<projectId>": "名称"}`）显示本地别名，未配置时显示「项目」。WorkBuddy 项目页里没有本地转录的纯云端任务不会出现在导入面板。
+- WorkBuddy 后台自动化的历史运行只显示最新一条（按 `automation_runs` 归并），与 WorkBuddy 侧栏一致；已导入的旧运行仍保留撤回入口。
+- 源工具会原地重写标题、last-prompt 等元数据；「有新增」以文件大小、首行哈希和最后一条真实消息时间为准，元数据变化不会误报
 - 推理内容（reasoning）默认丢弃：跨工具签名/加密不可重放
 - 用户消息里的图片会转存为 DSH 原生附件（优先源工具本地副本，签名 URL 仅作兜底；源副本被清理且链接过期的图片会丢弃）
-- 用户消息里的文件会写成 DSH 原生 `@路径` 引用，渲染为可点击文件 chip（点击在右侧栏预览）：Qoder 读「附件引用」列表，Claude Code 读 `@"…"` 文件提及，Codex 读「# Files mentioned by the user」包装和输入框写入的相对路径 markdown 链接（`$skill` 的 SKILL.md 链接属于技能引用，不移入正文）；文件缺失或为目录时跳过，原文本保留，不阻断导入
+- 用户消息里的文件会写成 DSH 原生 `@路径` 引用，渲染为可点击文件 chip（点击在右侧栏预览）：Qoder 读「附件引用」列表，Claude Code / WorkBuddy 读 `@"…"` 文件提及，Codex 读「# Files mentioned by the user」包装和输入框写入的相对路径 markdown 链接（`$skill` 的 SKILL.md 链接属于技能引用，不移入正文）；文件缺失或为目录时跳过，原文本保留，不阻断导入
 - DSH 没有删除会话的 API，撤回是删会话目录（只允许删本插件创建的 `import-` 前缀）
 
 ## License

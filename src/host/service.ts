@@ -30,9 +30,12 @@ import {
 import { cleanTitleText, parseClaudeJsonl } from './parsers/claude-jsonl.ts'
 import { DEFAULT_CODEX_DB, parseCodexDb, scanCodexDb } from './parsers/codex-db.ts'
 import { parseCodexJsonl } from './parsers/codex-jsonl.ts'
+import { parseWorkbuddyJsonl, workbuddyUserQuery } from './parsers/workbuddy-jsonl.ts'
+import { loadWorkBuddyMeta, type WorkBuddySessionMeta } from './parsers/workbuddy-meta.ts'
 import { adaptFileLinks } from './file-links.ts'
 import { ImportStateStore, recordKey } from './state.ts'
 import { attachSessionToWorkspace, detachSessionFromWorkspaces, type AttachOutcome } from './workspaces.ts'
+import { isScratchWorkspacePath } from '../shared/workspace.ts'
 
 /**
  * Workspace membership port. DSH's live registry keeps the sidebar in sync, so
@@ -136,6 +139,89 @@ export function rootsFor(provider: ProviderDescriptor): string[] {
   return roots.map(expandHome)
 }
 
+/**
+ * Shared scratch directories are one-off tasks, not projects: they group under
+ * 「最近任务」 and import without a workspace.
+ */
+export function workspaceCwdFor(
+  _provider: ProviderDescriptor | undefined,
+  cwd: string | undefined,
+): string | undefined {
+  return isScratchWorkspacePath(cwd) ? undefined : cwd
+}
+
+export interface WorkspaceFields {
+  cwd?: string
+  workspaceKey?: string
+  workspaceName?: string
+}
+
+/**
+ * Metadata records (titles, last-prompt) are rewritten in place, so bytes and
+ * mtime can move without new conversation. The head plus last message time is
+ * the stable content identity; legacy records without it fall back to the
+ * import time cutoff.
+ */
+export function sourceContentUnchanged(
+  record: ImportRecord,
+  snapshot: { bytes: number; mtimeMs: number },
+  headHash: string | undefined,
+  lastMessageAt: number | undefined,
+): boolean {
+  const headMatches = headHash !== undefined && record.fingerprint.headHash === headHash
+  if (record.fingerprint.bytes === snapshot.bytes
+    && (record.fingerprint.mtimeMs === snapshot.mtimeMs || headMatches)) {
+    return true
+  }
+  if (!headMatches) return false
+  if (record.lastMessageAt !== undefined) return record.lastMessageAt === lastMessageAt
+  return lastMessageAt === undefined || lastMessageAt <= record.importedAt
+}
+
+/**
+ * WorkBuddy uses its DB for grouping: cloud projects become one workspace,
+ * playground tasks without a project go to 「最近任务」, and real folders keep
+ * their path even when the folder name is a timestamp.
+ */
+export function workspaceFieldsFor(
+  provider: ProviderDescriptor | undefined,
+  meta: WorkBuddySessionMeta | undefined,
+  hintCwd: string | undefined,
+  projectNames?: Map<string, string>,
+): WorkspaceFields {
+  if (meta !== undefined) {
+    if (meta.projectId !== undefined) {
+      return {
+        workspaceKey: `workbuddy-project:${meta.projectId}`,
+        workspaceName: projectNames?.get(meta.projectId) ?? '项目',
+      }
+    }
+    if (meta.isPlayground) return {}
+    const path = meta.cwd ?? hintCwd
+    return path === undefined || isScratchWorkspacePath(path) ? {} : { cwd: path }
+  }
+  const path = workspaceCwdFor(provider, hintCwd)
+  return path === undefined ? {} : { cwd: path }
+}
+
+/**
+ * WorkBuddy keeps project names in its cloud account, not in the local
+ * database. Allow a local alias file so the picker can show the real name.
+ */
+export async function loadWorkBuddyProjectNames(): Promise<Map<string, string>> {
+  try {
+    const raw = await readFile(join(dshHome(), 'session-import', 'workbuddy-projects.json'), 'utf8')
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    return new Map(
+      Object.entries(parsed)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '')
+        .map(([id, name]) => [id, name.trim()]),
+    )
+  } catch {
+    return new Map()
+  }
+}
+
 export interface ScannedSession {
   /** Human-readable title hint from the source transcript. */
   title?: string
@@ -185,6 +271,34 @@ interface PendingScan extends ScannedSession {
   headHash?: string
   segmentStartAt?: number
   record?: ImportRecord
+  /** Same-id background runs (automations) collapse to the newest entry. */
+  backgroundGroupId?: string
+}
+
+/** One row per background group, matching the source tool's sidebar. */
+function collapseBackgroundRuns(entries: PendingScan[]): PendingScan[] {
+  const groups = new Map<string, PendingScan[]>()
+  const rows: PendingScan[] = []
+  for (const entry of entries) {
+    if (entry.backgroundGroupId === undefined) {
+      rows.push(entry)
+      continue
+    }
+    const group = groups.get(entry.backgroundGroupId)
+    if (group === undefined) groups.set(entry.backgroundGroupId, [entry])
+    else group.push(entry)
+  }
+  const timeOf = (entry: PendingScan): number => entry.lastMessageAt ?? entry.createdAtMs ?? entry.mtimeMs
+  for (const group of groups.values()) {
+    group.sort((a, b) => timeOf(b) - timeOf(a))
+    const latest = group[0]
+    if (latest !== undefined) rows.push(latest)
+    // Keep imported older runs so their retract entry does not disappear.
+    for (const entry of group.slice(1)) {
+      if (entry.record !== undefined) rows.push(entry)
+    }
+  }
+  return rows
 }
 
 /**
@@ -196,6 +310,9 @@ export async function scanProvider(
   records: Record<string, ImportRecord> = {},
 ): Promise<ScannedSession[]> {
   const sessionsAsset = provider.assets.sessions
+  const metadataDatabase = sessionsAsset?.metadata?.database
+  const sessionMeta = metadataDatabase === undefined ? undefined : await loadWorkBuddyMeta(expandHome(metadataDatabase))
+  const projectNames = metadataDatabase === undefined ? undefined : await loadWorkBuddyProjectNames()
   if (provider.family === 'codex-db') {
     return scanCodexDb({
       providerId: provider.id,
@@ -322,13 +439,9 @@ export async function scanProvider(
               && (lineageMode === 'segments' || !recordedPaths.has(normalizeSourcePath(idRecord.sourcePath)))
               ? idRecord
               : undefined)
-          // Source tools rewrite metadata records (titles, last-prompt) in place,
-          // so an mtime-only change is not "grown" when bytes and the transcript
-          // head still match the imported fingerprint.
+          // Metadata rewrites (titles, last-prompt) change bytes without new turns.
           const contentUnchanged = record !== undefined
-            && record.fingerprint.bytes === snapshot.bytes
-            && (record.fingerprint.mtimeMs === snapshot.mtimeMs
-              || (hint.headHash !== undefined && record.fingerprint.headHash === hint.headHash))
+            && sourceContentUnchanged(record, snapshot, hint.headHash, hint.lastMessageAt)
           const status: ScannedSession['status'] =
             record === undefined
               ? 'new'
@@ -349,6 +462,9 @@ export async function scanProvider(
           }) === true
           // Keep already-imported records visible so their retract entry survives.
           if (ignored && record === undefined) return
+          const meta = sessionMeta?.get(sessionId)
+          const title = meta?.customTitle ?? meta?.title ?? hint.title
+          const workspace = workspaceFieldsFor(provider, meta, hint.cwd, projectNames)
           entries.push({
             providerId: provider.id,
             sourcePath: file,
@@ -358,8 +474,11 @@ export async function scanProvider(
             mtimeMs: info.mtimeMs,
             ...(createdAtMs === 0 ? {} : { createdAtMs }),
             status,
-            ...(hint.title === undefined ? {} : { title: hint.title }),
-            ...(hint.cwd === undefined ? {} : { cwd: hint.cwd }),
+            ...(title === undefined ? {} : { title }),
+            ...(workspace.cwd === undefined ? {} : { cwd: workspace.cwd }),
+            ...(workspace.workspaceKey === undefined ? {} : { workspaceKey: workspace.workspaceKey }),
+            ...(workspace.workspaceName === undefined ? {} : { workspaceName: workspace.workspaceName }),
+            ...(meta?.backgroundGroupId === undefined ? {} : { backgroundGroupId: meta.backgroundGroupId }),
             ...(record === undefined ? {} : { dshSessionId: record.dshSessionId }),
             ...(hint.lineageId === undefined ? {} : { lineageId: hint.lineageId }),
             ...(hint.lastMessageAt === undefined ? {} : { lastMessageAt: hint.lastMessageAt }),
@@ -382,13 +501,15 @@ export async function scanProvider(
   }
   if (cacheDirty) persistHintCache()
 
+  const visibleEntries = collapseBackgroundRuns(entries)
+
   // Claude Code rewinds fork the conversation into a new transcript that copies
   // the leading turns. The source tool shows only the active branch, so the
   // picker does too: one row per lineage, pointing at the newest branch while
   // staying bound to the ledger record of the branch that was imported.
   const groups = new Map<string, PendingScan[]>()
   const rows: PendingScan[] = []
-  for (const entry of entries) {
+  for (const entry of visibleEntries) {
     if (entry.lineageId === undefined) {
       rows.push(entry)
       continue
@@ -411,9 +532,7 @@ export async function scanProvider(
       const unchanged = record !== undefined
         && record.sourcePaths !== undefined
         && sameSourcePathList(record.sourcePaths, sourcePaths)
-        && record.fingerprint.bytes === active.bytes
-        && (record.fingerprint.mtimeMs === active.mtimeMs
-          || (active.headHash !== undefined && record.fingerprint.headHash === active.headHash))
+        && sourceContentUnchanged(record, { bytes: active.bytes, mtimeMs: active.mtimeMs }, active.headHash, active.lastMessageAt)
       const continuationTitles = new Set(['继续', 'jixu', 'continue', '继续。'])
       const title = ordered
         .map(entry => entry.title)
@@ -572,6 +691,19 @@ export async function readSessionHint(file: string): Promise<{
         : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
       if (Number.isFinite(time) && (lastMessageAt === undefined || time > lastMessageAt)) lastMessageAt = time
     }
+    if (record['type'] === 'message' && (record['role'] === 'user' || record['role'] === 'assistant')) {
+      const stamp = record['timestamp']
+      const time = typeof stamp === 'number'
+        ? stamp
+        : typeof stamp === 'string' ? Date.parse(stamp) : Number.NaN
+      if (Number.isFinite(time) && (lastMessageAt === undefined || time > lastMessageAt)) lastMessageAt = time
+      if (userTitle === undefined && record['role'] === 'user') {
+        const raw = firstTextBlock(record['content'])
+        const query = raw === undefined ? undefined : workbuddyUserQuery(raw)
+        if (query !== undefined) userTitle = cleanTitleText(query)
+      }
+    }
+    if (sessionId === undefined && typeof record['sessionId'] === 'string') sessionId = record['sessionId']
     if (record['type'] === 'response_item') {
       const payload = record['payload'] as Record<string, unknown> | undefined
       if (payload?.['type'] === 'message' && (payload['role'] === 'user' || payload['role'] === 'assistant')) {
@@ -1015,15 +1147,25 @@ export async function runImport(
     })
   } else if (request.provider?.family === 'codex-jsonl') {
     parsed = await parseCodexJsonl(sourcePaths, { providerId: request.providerId })
+  } else if (request.provider?.family === 'workbuddy-jsonl') {
+    parsed = await parseWorkbuddyJsonl(request.sourcePath, { providerId: request.providerId })
   } else {
     parsed = await parseClaudeJsonl(request.sourcePath, { providerId: request.providerId })
   }
   const adapted = adaptFileLinks(parsed.events, request.provider?.fileLinks?.assistant, parsed.cwd)
+  const metadataDatabase = request.provider?.assets.sessions?.metadata?.database
+  const meta = metadataDatabase === undefined
+    ? undefined
+    : (await loadWorkBuddyMeta(expandHome(metadataDatabase))).get(parsed.sourceSessionId)
+  const projectNames = metadataDatabase === undefined ? undefined : await loadWorkBuddyProjectNames()
+  const metaTitle = meta?.customTitle ?? meta?.title
   const logicalId = request.sourceSessionId === undefined || request.sourceSessionId === ''
     ? parsed.sourceSessionId
     : request.sourceSessionId
   const session: ParsedSession = {
     ...(adapted.links === 0 ? parsed : { ...parsed, events: adapted.events }),
+    ...(meta?.cwd === undefined ? {} : { cwd: meta.cwd }),
+    ...(metaTitle === undefined ? {} : { title: metaTitle }),
     sourceSessionId: logicalId,
   }
   if (adapted.links > 0) {
@@ -1053,11 +1195,13 @@ export async function runImport(
 
     // A session file on disk is not enough: the sidebar groups by the workspace
     // registry, so an unattached session shows up under 「未分组」.
-    const cwd = session.cwd
-    const outcome =
-      workspace === undefined
-        ? await attachSessionToWorkspace(dshHome(), result.dshSessionId, cwd)
-        : await workspace.attach(result.dshSessionId, cwd)
+    const workspaceFields = workspaceFieldsFor(request.provider, meta, session.cwd, projectNames)
+    const workspaceCwd = workspaceFields.cwd
+    const outcome: AttachOutcome = workspaceCwd === undefined
+      ? { attached: false, reason: '会话没有工作区' }
+      : workspace === undefined
+        ? await attachSessionToWorkspace(dshHome(), result.dshSessionId, workspaceCwd)
+        : await workspace.attach(result.dshSessionId, workspaceCwd)
     console.info('[dsh-session-import] 工作区挂载: ' + (outcome.attached ? outcome.workspacePath : outcome.reason))
     return outcome.attached ? { ...result, workspacePath: outcome.workspacePath } : result
   }

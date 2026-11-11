@@ -21,7 +21,7 @@
     },
     "family": {
       "type": "string",
-      "enum": ["claude-jsonl", "codex-jsonl", "codex-db"],
+      "enum": ["claude-jsonl", "codex-jsonl", "codex-db", "workbuddy-jsonl"],
       "description": "会话解析器家族；同族工具共享实现"
     },
     "assets": {
@@ -136,6 +136,14 @@
           "properties": {
             "fields": { "type": "array", "items": { "type": "string" } },
             "fromFirstUserMessage": { "type": "boolean" }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "补充元数据（只读 SQLite），用于标题与空间归属等转录之外的信息",
+          "properties": {
+            "database": { "type": "string", "minLength": 1, "description": "SQLite 路径，支持 ~ 展开" }
           }
         },
         "lineage": {

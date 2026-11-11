@@ -9,6 +9,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { isScratchWorkspacePath } from '../shared/workspace.ts'
+
 export const inject: string[] = ['locale', 'sessions']
 
 /**
@@ -141,26 +143,9 @@ interface RetractTarget {
   items: ScannedSession[]
 }
 
-/**
- * Qoder auto-creates scratch folders for one-off tasks (`Documents/Qoder/<date>/<id>`,
- * `.qoderwork/workspace/*`, `chat-N`). Those are tasks without a workspace; a real
- * project folder is a workspace even when it holds a single session.
- */
-function isScratchWorkspace(cwd?: string): boolean {
-  if (cwd === undefined || cwd === '') return true
-  const path = cwd.replace(/\\/g, '/')
-  if (/\/\.qoderwork\/workspace\//i.test(path)) return true
-  if (/\/Documents\/Qoder\/\d{4}-\d{2}-\d{2}\//i.test(path)) return true
-  // Codex Desktop opens projectless chats in a dated scratch folder.
-  if (/(^|\/)Documents\/Codex$/i.test(path)) return true
-  if (/\/Documents\/Codex\/\d{4}-\d{2}-\d{2}\//i.test(path)) return true
-  const name = path.replace(/\/+$/, '').split('/').pop() ?? ''
-  return /^chat-\d+$/i.test(name)
-}
-
 /** Project display name, matching how the source tool's sidebar labels it. */
 function workspaceLabel(cwd?: string): string {
-  if (cwd === undefined || cwd === '') return '未归类'
+  if (cwd === undefined || cwd === '') return '最近任务'
   const parts = cwd.split(/[\\/]/).filter(Boolean)
   return parts.at(-1) ?? cwd
 }
@@ -175,13 +160,16 @@ function canonicalWorkspaceKey(cwd?: string): string {
 function groupByWorkspace(list: ScannedSession[]): WorkspaceGroup[] {
   const map = new Map<string, WorkspaceGroup>()
   for (const item of list) {
-    const key = item.workspaceKey ?? canonicalWorkspaceKey(item.cwd)
+    // Undefined cwd and provider scratch directories both mean "one-off task":
+    // one shared 「最近任务」 bucket, never a workspace row of its own.
+    const scratch = item.workspaceKey === undefined && isScratchWorkspacePath(item.cwd)
+    const key = item.workspaceKey ?? (scratch ? '' : canonicalWorkspaceKey(item.cwd))
     let group = map.get(key)
     if (group === undefined) {
       group = {
         key,
-        label: item.workspaceName ?? workspaceLabel(item.cwd),
-        path: item.cwd,
+        label: item.workspaceName ?? (scratch ? '最近任务' : workspaceLabel(item.cwd)),
+        ...(scratch || item.cwd === undefined ? {} : { path: item.cwd }),
         createdAt: item.createdAtMs ?? 0,
         ...(item.workspaceEphemeral === true ? { ephemeral: true } : {}),
         sessions: [],
@@ -534,9 +522,9 @@ function Section(): React.ReactElement {
       const list = sessions[provider.id]
       if (chosen === undefined || chosen.size === 0 || list === undefined) continue
       for (const item of list) {
-        if (chosen.has(item.sourceSessionId) && item.workspaceEphemeral !== true && !isScratchWorkspace(item.cwd) && item.cwd !== undefined) {
-          paths.add(item.workspaceKey ?? canonicalWorkspaceKey(item.cwd))
-        }
+        if (!chosen.has(item.sourceSessionId) || item.workspaceEphemeral === true) continue
+        const key = item.workspaceKey ?? (isScratchWorkspacePath(item.cwd) ? '' : canonicalWorkspaceKey(item.cwd))
+        if (key !== '') paths.add(key)
       }
     }
     return paths.size
@@ -650,7 +638,7 @@ function Section(): React.ReactElement {
     const workspaces = [
       ...new Set(
         results
-          .filter(item => !isScratchWorkspace(item.cwd))
+          .filter(item => !isScratchWorkspacePath(item.cwd))
           .map(item => (item.cwd === undefined ? '' : workspaceLabel(item.cwd)))
           .filter(name => name !== ''),
       ),
@@ -846,7 +834,7 @@ function Section(): React.ReactElement {
       }
     }
     const groups = groupByWorkspace(list)
-    const allWorkspaceGroups = groups.filter(group => group.ephemeral !== true && !isScratchWorkspace(group.path))
+    const allWorkspaceGroups = groups.filter(group => group.ephemeral !== true && group.key !== '')
     const workspaceGroups = allWorkspaceGroups
       .map(group => {
         const visibleSessions = queryText === '' || matchesText(group.label) || matchesText(group.path)
@@ -856,11 +844,8 @@ function Section(): React.ReactElement {
       })
       .filter(group => group.sessions.length > 0)
       .sort((a, b) => b.createdAt - a.createdAt)
-    const recentGroups = groups.filter(group => group.ephemeral === true || isScratchWorkspace(group.path))
-    const recentLabels = [...new Set(recentGroups.map(group => group.label))]
-    // Codex projectless chats share one "聊天" bucket; Qoder's scratch folders
-    // keep the generic label because each one is a separate task.
-    const recentLabel = recentLabels.length === 1 ? recentLabels[0]! : '最近任务'
+    const recentGroups = groups.filter(group => group.ephemeral === true || group.key === '')
+    const recentLabel = '最近任务'
     const allRecentSessions = recentGroups
       .flatMap(group => group.sessions)
       .sort((a, b) => b.mtimeMs - a.mtimeMs)
@@ -928,10 +913,11 @@ function Section(): React.ReactElement {
         const chosenInScope = scopeIds.filter(id => chosen.has(id)).length
         const allScopeChosen = scopeIds.length > 0 && chosenInScope === scopeIds.length
         const scopeLabel = queryText !== '' ? '全选匹配的会话' : `全选 ${provider.name} 会话`
+        const sessionLabel = (item: ScannedSession): string => item.title ?? '未命名会话'
         const sessionRow = (item: ScannedSession): React.ReactElement => (
           <label
             className={`dsi-check dsi-item${item.status !== 'new' ? ' dsi-item-act' : ''}`}
-            title={item.title ?? item.sourceSessionId}
+            title={sessionLabel(item)}
           >
             <input
               className="dsi-box-input"
@@ -940,7 +926,7 @@ function Section(): React.ReactElement {
               onChange={() => toggle(provider.id, item.sourceSessionId)}
             />
             <span className="dsi-box" aria-hidden>{chosen.has(item.sourceSessionId) && <Check />}</span>
-            <span className="dsi-item-title">{item.title ?? item.sourceSessionId.slice(0, 8)}</span>
+            <span className="dsi-item-title">{sessionLabel(item)}</span>
             {item.status !== 'new' && (
               <span className="dsi-item-slot">
                 <StatusIcon status={item.status} />
@@ -957,7 +943,7 @@ function Section(): React.ReactElement {
                     setRetractTarget({
                       kind: 'session',
                       providerId: provider.id,
-                      label: item.title ?? item.sourceSessionId.slice(0, 8),
+                      label: sessionLabel(item),
                       items: [item],
                     })
                   }}
@@ -1102,7 +1088,7 @@ function Section(): React.ReactElement {
                           className="dsi-ws-toggle"
                           type="button"
                           aria-expanded={wsOpen}
-                          title={`${group.path} · ${group.sessions.length} 个会话`}
+                          title={`${group.path ?? group.label} · ${group.sessions.length} 个会话`}
                           onClick={() => {
                             if (queryText !== '') toggleSearchGroup(wsKey)
                             else toggleWorkspace(wsKey)
