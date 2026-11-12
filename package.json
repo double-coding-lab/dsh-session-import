@@ -54,7 +54,7 @@
     "check": "node scripts/check.mjs"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-session": "*"
   },
   "devDependencies": {
