@@ -1,6 +1,6 @@
 {
   "name": "@double-coding/dsh-session-import",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DeepSeek Harness plugin: import third-party agent sessions (Qoder, Claude Code, Codex, WorkBuddy…) as resumable DSH sessions, with a data-only provider model.",
   "keywords": [
     "deepseek-harness",
