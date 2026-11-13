@@ -53,6 +53,11 @@ jobs:
       - name: Build and test
         run: npm run check
 
+      - name: Point README images at the tagged raw assets
+        run: |
+          RAW="https://raw.githubusercontent.com/double-coding-lab/dsh-session-import/${GITHUB_REF_NAME}/assets/readme/"
+          sed -i "s#\./assets/readme/#${RAW}#g" README.md README.en.md
+
       - name: Verify package contents
         run: npm pack --dry-run
 
