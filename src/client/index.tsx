@@ -1310,7 +1310,7 @@ function Section(): React.ReactElement {
 
       {confirming && (
         <div
-          className="dsi-mask"
+          className="dsi-mask" data-window-drag-exclude
           role="presentation"
           onClick={() => {
             if (!busy) setConfirming(false)
@@ -1360,7 +1360,7 @@ function Section(): React.ReactElement {
 
       {retractTarget !== undefined && (
         <div
-          className="dsi-mask"
+          className="dsi-mask" data-window-drag-exclude
           role="presentation"
           onClick={() => {
             if (!retracting) setRetractTarget(undefined)
