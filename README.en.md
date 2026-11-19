@@ -55,9 +55,11 @@ Settings → **Session Import**. Sessions are grouped by app → workspace, and 
 
 Temporary single sessions (missing cwd, Qoder / Codex scratch directories, WorkBuddy quick tasks without a project) all appear under Recent tasks. Projects and workspaces keep the grouping they had in the source tool, so a single session never turns into an empty workspace.
 
+ZIP exports from the DeepSeek website (chat.deepseek.com) are out of scope here. DSH ships an optional bundle for those, "DeepSeek chat import" (`@deepseek-ai/dsh-deepseek-chat-import`), with its entry next to New session. The two read different sources and can be enabled together.
+
 ## Install
 
-Requires Node `^22.19.0 || >=24.0.0` and DeepSeekRuntime `0.2.x` (tested on 0.2.1).
+Requires Node `^22.19.0 || >=24.0.0` and DeepSeekRuntime `>=0.2.1 <0.3.0` (tested on 0.2.1 and 0.2.2-rc.5).
 
 ### DSH Desktop
 

@@ -55,9 +55,11 @@
 
 临时单会话（cwd 缺失、Qoder / Codex scratch 目录、WorkBuddy 无项目的快速任务）统一显示在「最近任务」。项目和工作区沿用源工具的分组；临时单会话不会创建新的工作区。
 
+DeepSeek 官网（chat.deepseek.com）导出的 ZIP 不在本插件范围内。那类导入由 DSH 自带的可选 bundle「DeepSeek 会话导入」（`@deepseek-ai/dsh-deepseek-chat-import`）负责，入口在「新建会话」旁边；两者读取的来源不同，可以同时启用。
+
 ## 安装
 
-要求：Node `^22.19.0 || >=24.0.0`，DeepSeekRuntime `0.2.x`（在 0.2.1 上验证）。
+要求：Node `^22.19.0 || >=24.0.0`，DeepSeekRuntime `>=0.2.1 <0.3.0`（在 0.2.1 和 0.2.2-rc.5 上验证）。
 
 ### DSH Desktop
 
