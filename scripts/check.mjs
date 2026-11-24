@@ -55,6 +55,7 @@ try {
 
   if (!existsSync(fixture)) throw new Error(`缺少 fixture：${fixture}`)
   run('结构自检（fixture）', process.execPath, ['scripts/verify.ts', fixture])
+  run('助手正文思考标签自检', process.execPath, ['scripts/test-inline-thinking.ts'])
   run('导入幂等自检（fixture）', process.execPath, ['scripts/test-importer.ts', fixture])
   run('文件链接自检', process.execPath, ['scripts/test-file-links.ts'])
   run('无 active-leaf 恢复自检', process.execPath, ['scripts/test-recovery.ts'])

@@ -472,17 +472,33 @@ export async function parseClaudeJsonl(
     } else if (record.type === 'assistant') {
       const blocks = Array.isArray(content) ? content : [{ type: 'text', text: blockText(content) }]
       const model = typeof record.message?.model === 'string' ? record.message.model : undefined
+      let inPreamble = true
       for (const raw of blocks) {
         if (!raw || typeof raw !== 'object') continue
         const block = raw as { type?: string; text?: unknown; thinking?: unknown; id?: unknown; name?: unknown; input?: unknown }
         stats.blocks[block.type ?? 'unknown'] = (stats.blocks[block.type ?? 'unknown'] ?? 0) + 1
         if (block.type === 'text') {
-          const text = blockText(block.text)
-          if (text !== '') push({ kind: 'assistant', time, text, model })
+          const original = blockText(block.text)
+          let text = original
+          if (inPreamble) {
+            // Four spaces or a tab start Markdown code, where tags are literal.
+            const wrapper = /^(?:[ \t]*\r?\n)* {0,3}<thinking>([\s\S]*?)<\/thinking>/
+            for (let match = wrapper.exec(text); match !== null; match = wrapper.exec(text)) {
+              if (match[1]) push({ kind: 'reasoning', time, text: match[1] })
+              text = text.slice(match[0].length)
+            }
+            if (text !== original && !text.trim()) continue
+          }
+          if (text !== '') {
+            inPreamble = false
+            push({ kind: 'assistant', time, text, model })
+          }
         } else if (block.type === 'thinking') {
+          inPreamble = false
           const text = blockText(block.thinking)
           if (text !== '') push({ kind: 'reasoning', time, text })
         } else if (block.type === 'tool_use') {
+          inPreamble = false
           push({
             kind: 'tool-call',
             time,
